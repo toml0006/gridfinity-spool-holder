@@ -77,6 +77,41 @@ would tile into this footprint.
 
 Columns run along Y. Running them the other way packs only 28.
 
+## Fusion 360
+
+`fusion/GridfinitySpoolHolder.py` builds the same bin through the Fusion API.
+Install it under `API/Scripts/GridfinitySpoolHolder/` and run it from
+Utilities > Scripts and Add-Ins.
+
+Parameters can be edited either in the file or in Modify > Change Parameters.
+The design parameters win if they exist, so whichever you touched last is
+what you get.
+
+**Changing a parameter does not rebuild the model on its own -- run the
+script again.** That is a genuine limit rather than an oversight: the unit
+counts and the spool spacing change how many feet and pegs exist, and a
+parameter cannot add or remove bodies. Re-running is safe and repeatable,
+because the script deletes the previous build first.
+
+Deleting that previous build is fiddly enough to be worth recording. Deleting
+the sketches does *not* cascade to the features that consumed them, and
+calling `deleteMe()` on a body returns `True` while leaving the body in
+place. Clearing anything other than the features first appears to work and
+silently leaves the old bin behind, renamed to `Body2`, sitting inside the
+new one. The features have to go first, newest to oldest.
+
+| Parameter | Meaning |
+|---|---|
+| `gf_units_x` / `gf_units_y` | footprint, in 42mm gridfinity units |
+| `gf_units_z` | height, in 7mm units |
+| `spool_spacing` | peg centre spacing, and the widest flange that fits |
+| `peg_height` / `peg_dia` | peg size |
+| `wall` / `floor_thickness` | shell |
+
+Peg count follows from the footprint and spacing; the lattice re-packs and
+re-centres itself. Below 7 height units a 38mm peg stands proud of the rim
+and the bin stops stacking, so the script warns and tells you the minimum.
+
 ## Known tradeoffs
 
 - The base feet are modelled solid. Real gridfinity libraries hollow them to
