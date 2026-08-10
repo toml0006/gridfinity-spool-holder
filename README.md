@@ -77,6 +77,48 @@ would tile into this footprint.
 
 Columns run along Y. Running them the other way packs only 28.
 
+## MakerWorld
+
+`makerworld/gridfinity_spool_holder.scad` is a single self-contained file for
+MakerWorld's Parametric Model Maker -- no `include<>` to resolve, and every
+knob annotated for the customizer UI.
+
+| Group | Parameters |
+|---|---|
+| Bin size | `grid_x`, `grid_y` (1-6 units), `grid_z` (3-20), `stacking_lip` |
+| Spools | `spool_spacing`, `peg_dia`, `peg_height` |
+| Shell | `wall`, `floor_thickness` |
+| Quality | `detail` |
+
+Footprint is capped at 6 units because 6 x 42 - 0.5 = 251.5mm, about as much
+as a 256mm bed takes. `detail` is the escape hatch if generation times out:
+it is facets per circle, and render time is close to linear in it.
+
+Rendered locally on OpenSCAD 2021.01, which is CGAL only. Anything newer uses
+the Manifold backend and is far quicker, so treat these as a pessimistic
+ceiling rather than what MakerWorld will do:
+
+| Case | Pegs | Render |
+|---|---|---|
+| 1x1x3 | 1 | 8s |
+| 2x3x7 | 12 | 17s |
+| 3x4x7 default | 30 | 25s |
+| spacing 15 | 90 | 82s |
+| 6x6x7 | 105 | 104s |
+
+Every one of eleven cases across the parameter range -- the extremes of each
+range, lipless, dense and sparse spacing, fat pegs, thick walls -- renders to
+a watertight single body with positive volume. The default configuration also
+passes all 33 geometry checks in `validate.py`.
+
+Two things worth knowing if you edit it. Sections of the base and lip meet on
+exact planes, and solids that only touch on a coincident face are not
+reliably fused -- the result measures perfectly and is not watertight, so it
+will not slice. The straight sections are deliberately grown 0.01mm into
+their neighbours to prevent that. And rounded boxes are built as a hull of
+four cylinders rather than `offset()` on a square: both are exact, but
+`offset()` is a 2D minkowski and costs far more.
+
 ## Fusion 360
 
 `fusion/GridfinitySpoolHolder.py` builds the same bin through the Fusion API.
