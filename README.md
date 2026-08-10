@@ -83,9 +83,11 @@ Columns run along Y. Running them the other way packs only 28.
 Install it under `API/Scripts/GridfinitySpoolHolder/` and run it from
 Utilities > Scripts and Add-Ins.
 
-Parameters can be edited either in the file or in Modify > Change Parameters.
-The design parameters win if they exist, so whichever you touched last is
-what you get.
+It opens a dialog first, seeded from the design's user parameters if they
+exist and from the defaults in the file otherwise. Nothing is built and
+nothing is deleted until you press OK. Pressing OK writes the values back to
+the design, so the file, the dialog and the parameters stay in step. Set
+`ASK_BEFORE_RUN = False` to skip the dialog for scripted runs.
 
 **Changing a parameter does not rebuild the model on its own -- run the
 script again.** That is a genuine limit rather than an oversight: the unit
@@ -111,6 +113,11 @@ new one. The features have to go first, newest to oldest.
 Peg count follows from the footprint and spacing; the lattice re-packs and
 re-centres itself. Below 7 height units a 38mm peg stands proud of the rim
 and the bin stops stacking, so the script warns and tells you the minimum.
+
+The whole part is 11 features. Every peg circle shares one sketch and the
+whole collection of profiles goes into a single extrude, and the base is one
+foot plus a rectangular pattern. Extruding each profile separately instead
+built the identical part out of 165 features and a 219 entry timeline.
 
 ## Known tradeoffs
 
