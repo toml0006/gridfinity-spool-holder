@@ -1,0 +1,5 @@
+*.stl
+!out/*.stl
+*.3mf
+.DS_Store
+__pycache__/
