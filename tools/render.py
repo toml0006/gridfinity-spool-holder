@@ -44,13 +44,20 @@ GCODE = os.path.join(HERE, "out", "spool_holder_3x4x7.gcode")
 #: squashed onto the one below and fuses with it; sized exactly to the
 #: layer pitch the tubes merely touch, leaving hard grooves that alias
 #: into moire. 15 percent over gives real overlap.
-BEAD_H = 0.30          # sliced at 0.28
+BEAD_H = 0.325         # sliced at 0.28
 BEAD_WIDTH = 0.48      # extrusion width 0.45
 OUT = os.path.join(HERE, "renders")
 
 MM = 0.001
 RES = (2000, 1500)
 SAMPLES = int(os.environ.get("RENDER_SAMPLES", "320"))
+
+#: Render this many times larger, then box-filter down. Bead geometry sits at
+#: 2-3px per layer, right at the Nyquist limit: point-sampled it either
+#: vanishes into flat grey or beats against the pixel grid as moire. Rendering
+#: at 2x and integrating gives each output pixel the real sub-pixel detail,
+#: which is the only thing that fixes both at once.
+SUPERSAMPLE = int(os.environ.get("RENDER_SS", "2"))
 
 # Sub-visible, but enough to stop coplanar faces fighting.
 CONTACT_LIFT = 0.00015
@@ -97,7 +104,8 @@ def reset_scene():
     scene.render.engine = "CYCLES"
     scene.cycles.samples = SAMPLES
     scene.cycles.use_denoising = True
-    scene.render.resolution_x, scene.render.resolution_y = RES
+    scene.render.resolution_x = RES[0] * SUPERSAMPLE
+    scene.render.resolution_y = RES[1] * SUPERSAMPLE
     scene.view_settings.view_transform = "AgX"
     # AgX rolls highlights off beautifully but desaturates hard, and the only
     # colour in frame is the thread. Punchy puts it back.
@@ -1187,6 +1195,16 @@ SHOTS = {
 }
 
 
+def downsample(path, size):
+    """Box-filter the oversized render down to delivery size."""
+    img = bpy.data.images.load(path)
+    img.scale(size[0], size[1])
+    img.filepath_raw = path
+    img.file_format = "PNG"
+    img.save()
+    bpy.data.images.remove(img)
+
+
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     wanted = argv if argv else list(SHOTS)
@@ -1200,6 +1218,8 @@ def main():
         path = os.path.join(OUT, name + ".png")
         bpy.context.scene.render.filepath = path
         bpy.ops.render.render(write_still=True)
+        if SUPERSAMPLE > 1:
+            downsample(path, RES)
         print("RENDERED %s" % path)
 
 

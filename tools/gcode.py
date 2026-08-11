@@ -106,7 +106,7 @@ def parse(path, visible=None, min_seg=0.0):
     return runs
 
 
-def bead_profile(name, width=0.45, height=0.28, segments=12):
+def bead_profile(name, width=0.45, height=0.28, segments=16):
     """Cross-section of a deposited bead: a squashed round, not a circle.
 
     The nozzle lays a round bead and the layer above squashes it against the
