@@ -1,15 +1,25 @@
-"""Studio renders of the spool holder, for a model listing.
+"""Craft room renders of the spool holder, for a model listing.
 
     /Applications/Blender.app/Contents/MacOS/Blender -b --python tools/render.py
+    /Applications/Blender.app/Contents/MacOS/Blender -b --python tools/render.py -- hero_loaded
 
-Everything is built in real world units -- the bin is 125.5mm across and the
-lights are centimetres wide -- so the falloff, the depth of field and the
-shadow softness come out of physical numbers rather than being dialled in by
-eye. Scenes assembled at 1 unit = 1 metre for the same reason.
+Everything is built in real world units -- the bin is 125.5mm across, the mat
+is 620mm, the window is a metre and a half of soft light -- so falloff, shadow
+softness and depth of field come out of physical numbers.
 
-The spools are generated here rather than modelled: a revolved profile at the
-real dimensions the peg spacing implies, so what you see loaded into the bin
-is what actually fits.
+Three things here are less obvious than they look:
+
+* Anything resting on a surface is lifted CONTACT_LIFT above it. The bin's
+  underside is at exactly z=0 and so is the table, and two coplanar faces
+  z-fight: the renderer lets the table cut through the feet and the part
+  reads as sunk into the ground.
+* The filament shader textures top faces differently from walls. A print
+  shows layer lines on its sides and extrusion beads on its top surfaces,
+  and using one texture everywhere is most of what makes a render read as
+  CAD rather than as a printed object.
+* The spools are dirty. Clean procedural plastic reads as a product mockup;
+  thread spools in a real craft room have dust in the flange corners and
+  scuffs on the sides.
 """
 
 import math
@@ -28,12 +38,13 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STL = os.path.join(HERE, "out", "spool_holder_3x4x7.stl")
 OUT = os.path.join(HERE, "renders")
 
-MM = 0.001              # model is in mm, scenes are in metres
-
+MM = 0.001
 RES = (2000, 1500)
 SAMPLES = int(os.environ.get("RENDER_SAMPLES", "320"))
 
-# Bin geometry, needed to place spools and stack copies.
+# Sub-visible, but enough to stop coplanar faces fighting.
+CONTACT_LIFT = 0.00015
+
 PITCH, GAP = 42.0, 0.5
 GRID_X, GRID_Y, GRID_Z = 3, 4, 7
 SPOOL_SPACING = 24.68
@@ -43,22 +54,26 @@ PEG_HEIGHT = 38.0
 UNIT_Z = 7.0
 STACK_PITCH = UNIT_Z * GRID_Z          # 49.0, verified against the mesh
 
-# Spool, sized off the spacing: the flange is what sets the 24.68 constraint.
 SP_H = 40.0
 SP_FLANGE_D = 24.0
 SP_FLANGE_T = 1.5
 SP_CORE_D = 13.0
 SP_BORE_D = 6.4
-SP_THREAD_D = 23.4     # nearly flush with the flange, so the colour reads
+SP_THREAD_D = 23.4
 
-FILAMENT = (0.055, 0.058, 0.065)       # matte dark grey PLA, linear
-LAYER_H = 0.2                          # for the micro relief
+FILAMENT = (0.052, 0.055, 0.062)       # matte dark grey PLA, linear
+LAYER_H = 0.2                          # print layer height, mm
+BEAD_W = 0.42                          # extrusion width on top surfaces, mm
+
+MAT_TOP = 0.003                        # cutting mat thickness
+REST = MAT_TOP + CONTACT_LIFT          # z for anything sitting on the mat
 
 THREAD_COLOURS = [
-    (0.72, 0.13, 0.14), (0.86, 0.44, 0.09), (0.90, 0.72, 0.16),
-    (0.20, 0.42, 0.22), (0.13, 0.30, 0.52), (0.35, 0.18, 0.45),
-    (0.78, 0.42, 0.55), (0.85, 0.83, 0.76), (0.10, 0.11, 0.13),
-    (0.15, 0.55, 0.52), (0.60, 0.28, 0.13), (0.45, 0.58, 0.24),
+    (0.55, 0.09, 0.10), (0.72, 0.32, 0.06), (0.78, 0.60, 0.12),
+    (0.14, 0.32, 0.16), (0.09, 0.21, 0.40), (0.26, 0.13, 0.34),
+    (0.66, 0.33, 0.44), (0.74, 0.71, 0.63), (0.07, 0.08, 0.09),
+    (0.10, 0.42, 0.40), (0.48, 0.21, 0.10), (0.35, 0.46, 0.18),
+    (0.80, 0.76, 0.66), (0.30, 0.10, 0.12), (0.18, 0.26, 0.45),
 ]
 
 
@@ -73,9 +88,10 @@ def reset_scene():
     scene.cycles.samples = SAMPLES
     scene.cycles.use_denoising = True
     scene.render.resolution_x, scene.render.resolution_y = RES
-    scene.render.film_transparent = False
-    scene.view_settings.view_transform = "AgX"     # filmic highlight rolloff
-    scene.view_settings.look = "AgX - Medium High Contrast"
+    scene.view_settings.view_transform = "AgX"
+    # AgX rolls highlights off beautifully but desaturates hard, and the only
+    # colour in frame is the thread. Punchy puts it back.
+    scene.view_settings.look = "AgX - Punchy"
 
     prefs = bpy.context.preferences.addons["cycles"].preferences
     try:
@@ -86,17 +102,14 @@ def reset_scene():
         scene.cycles.device = "GPU"
     except Exception:
         scene.cycles.device = "CPU"
-    return scene
 
-
-def world_backdrop(scene, strength=0.35):
-    """Dim neutral environment. The area lights do the real work."""
     world = bpy.data.worlds.new("W")
     scene.world = world
     world.use_nodes = True
     bg = world.node_tree.nodes["Background"]
-    bg.inputs[0].default_value = (0.05, 0.055, 0.065, 1)
-    bg.inputs[1].default_value = strength
+    bg.inputs[0].default_value = (0.16, 0.15, 0.14, 1)
+    bg.inputs[1].default_value = 0.35
+    return scene
 
 
 def area_light(name, loc, look_at, size, energy, colour=(1, 1, 1)):
@@ -108,49 +121,7 @@ def area_light(name, loc, look_at, size, energy, colour=(1, 1, 1)):
     obj = bpy.data.objects.new(name, data)
     bpy.context.collection.objects.link(obj)
     obj.location = loc
-    direction = Vector(look_at) - Vector(loc)
-    obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
-    return obj
-
-
-def sweep(width=4.0, depth=3.0, height=2.0, radius=0.6, back=0.45):
-    """Seamless backdrop: a floor that curves up into a wall.
-
-    `back` is how far behind the origin the wall starts. The subject sits at
-    the origin, so a wall at y=0 puts the camera nose to nose with it and the
-    frame comes back as flat grey.
-    """
-    mesh = bpy.data.meshes.new("sweep")
-    obj = bpy.data.objects.new("sweep", mesh)
-    bpy.context.collection.objects.link(obj)
-
-    # Floor, a quarter round fillet, then wall. Written as an explicit arc
-    # about its centre so the tangents actually match at both ends; eyeballed
-    # profiles leave a crease that catches light and reads as a seam.
-    bm = bmesh.new()
-    steps = 24
-    profile = [(-depth, 0.0)]
-    cy, cz = back - radius, radius
-    for i in range(steps + 1):
-        a = math.radians(-90 + 90 * i / steps)
-        profile.append((cy + radius * math.cos(a), cz + radius * math.sin(a)))
-    profile.append((back, height))
-    verts_prev = None
-    for (y, z) in profile:
-        row = [bm.verts.new((-width / 2, y, z)), bm.verts.new((width / 2, y, z))]
-        if verts_prev:
-            bm.faces.new([verts_prev[0], verts_prev[1], row[1], row[0]])
-        verts_prev = row
-    bm.to_mesh(mesh)
-    bm.free()
-
-    mat = bpy.data.materials.new("backdrop")
-    mat.use_nodes = True
-    bsdf = mat.node_tree.nodes["Principled BSDF"]
-    bsdf.inputs["Base Color"].default_value = (0.20, 0.21, 0.23, 1)
-    bsdf.inputs["Roughness"].default_value = 0.85
-    obj.data.materials.append(mat)
-    obj.data.shade_smooth()
+    obj.rotation_euler = (Vector(look_at) - Vector(loc)).to_track_quat("-Z", "Y").to_euler()
     return obj
 
 
@@ -169,118 +140,28 @@ def camera(scene, loc, target, lens=85, fstop=None, focus=None):
     return obj
 
 
-# --------------------------------------------------------------------------
-# Materials
-# --------------------------------------------------------------------------
-
-def filament_material(name, colour, roughness=0.62):
-    """Matte PLA with layer lines.
-
-    The relief is a wave texture running up object Z at the real layer pitch.
-    Bump rather than displacement: at 0.2mm on a 125mm part, real geometry
-    would cost a great deal and look identical at these framings.
-    """
-    mat = bpy.data.materials.new(name)
-    mat.use_nodes = True
-    nt = mat.node_tree
-    bsdf = nt.nodes["Principled BSDF"]
-    bsdf.inputs["Base Color"].default_value = (*colour, 1)
-    bsdf.inputs["Roughness"].default_value = roughness
-    bsdf.inputs["Specular IOR Level"].default_value = 0.35
-    # A trace of translucency; PLA is not a pure opaque dielectric.
-    if "Subsurface Weight" in bsdf.inputs:
-        bsdf.inputs["Subsurface Weight"].default_value = 0.02
-        bsdf.inputs["Subsurface Radius"].default_value = (0.6, 0.5, 0.45)
-
-    tex_co = nt.nodes.new("ShaderNodeTexCoord")
-    sep = nt.nodes.new("ShaderNodeSeparateXYZ")
-    wave = nt.nodes.new("ShaderNodeTexWave")
-    wave.wave_type = "BANDS"
-    wave.bands_direction = "Z"
-    wave.wave_profile = "SIN"
-    # One band per layer: scale is in Blender units, the object is in metres.
-    wave.inputs["Scale"].default_value = 1.0 / (LAYER_H * MM * 2)
-    wave.inputs["Distortion"].default_value = 0.0
-
-    noise = nt.nodes.new("ShaderNodeTexNoise")
-    noise.inputs["Scale"].default_value = 900.0
-    noise.inputs["Detail"].default_value = 6.0
-
-    # Math nodes rather than a Mix: ShaderNodeMix carries one A/B pair per
-    # data type, so looking sockets up by name can quietly bind the wrong one.
-    m_wave = nt.nodes.new("ShaderNodeMath")
-    m_wave.operation = "MULTIPLY"
-    m_wave.inputs[1].default_value = 0.8
-    m_noise = nt.nodes.new("ShaderNodeMath")
-    m_noise.operation = "MULTIPLY"
-    m_noise.inputs[1].default_value = 0.2
-    mix = nt.nodes.new("ShaderNodeMath")
-    mix.operation = "ADD"
-
-    bump = nt.nodes.new("ShaderNodeBump")
-    bump.inputs["Strength"].default_value = 0.5
-    bump.inputs["Distance"].default_value = 0.00012
-
-    nt.links.new(tex_co.outputs["Object"], sep.inputs["Vector"])
-    nt.links.new(tex_co.outputs["Object"], wave.inputs["Vector"])
-    nt.links.new(tex_co.outputs["Object"], noise.inputs["Vector"])
-    nt.links.new(wave.outputs["Fac"], m_wave.inputs[0])
-    nt.links.new(noise.outputs["Fac"], m_noise.inputs[0])
-    nt.links.new(m_wave.outputs[0], mix.inputs[0])
-    nt.links.new(m_noise.outputs[0], mix.inputs[1])
-    nt.links.new(mix.outputs[0], bump.inputs["Height"])
-    nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
-    return mat
+def box(name, size, location, rotation=(0, 0, 0), bevel=0.0):
+    bpy.ops.mesh.primitive_cube_add(size=1, location=location, rotation=rotation)
+    obj = bpy.context.active_object
+    obj.name = name
+    obj.scale = size
+    if bevel:
+        b = obj.modifiers.new("bevel", "BEVEL")
+        b.width = bevel
+        b.segments = 3
+        b.limit_method = "ANGLE"
+    return obj
 
 
-def plastic_material(name, colour, roughness=0.35, translucent=False):
-    """Spool body. Real thread spools are frosted translucent plastic, not
-    white -- render them opaque and a loaded bin becomes a field of blank
-    discs with the thread colour hidden underneath."""
-    mat = bpy.data.materials.new(name)
-    mat.use_nodes = True
-    b = mat.node_tree.nodes["Principled BSDF"]
-    b.inputs["Base Color"].default_value = (*colour, 1)
-    b.inputs["Roughness"].default_value = roughness
-    if translucent:
-        # Frosted, not glassy. Smooth high transmission reads as chrome under
-        # a hard key, which is the opposite of a cheap plastic spool.
-        b.inputs["Transmission Weight"].default_value = 0.55
-        b.inputs["IOR"].default_value = 1.48
-        b.inputs["Roughness"].default_value = 0.42
-    return mat
+def cyl(name, radius, depth, location, rotation=(0, 0, 0), verts=48):
+    bpy.ops.mesh.primitive_cylinder_add(radius=radius, depth=depth,
+                                        location=location, rotation=rotation,
+                                        vertices=verts)
+    obj = bpy.context.active_object
+    obj.name = name
+    obj.data.shade_smooth()
+    return obj
 
-
-def thread_material(name, colour):
-    """Wound thread: fine bands plus a sheen, so it does not read as plastic."""
-    mat = bpy.data.materials.new(name)
-    mat.use_nodes = True
-    nt = mat.node_tree
-    b = nt.nodes["Principled BSDF"]
-    b.inputs["Base Color"].default_value = (*colour, 1)
-    b.inputs["Roughness"].default_value = 0.55
-    if "Sheen Weight" in b.inputs:
-        b.inputs["Sheen Weight"].default_value = 0.6
-        b.inputs["Sheen Roughness"].default_value = 0.3
-
-    co = nt.nodes.new("ShaderNodeTexCoord")
-    wave = nt.nodes.new("ShaderNodeTexWave")
-    wave.wave_type = "BANDS"
-    wave.bands_direction = "Z"
-    wave.inputs["Scale"].default_value = 2500.0
-    wave.inputs["Distortion"].default_value = 2.0
-    bump = nt.nodes.new("ShaderNodeBump")
-    bump.inputs["Strength"].default_value = 0.35
-    bump.inputs["Distance"].default_value = 0.00002
-    nt.links.new(co.outputs["Object"], wave.inputs["Vector"])
-    nt.links.new(wave.outputs["Fac"], bump.inputs["Height"])
-    nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
-    return mat
-
-
-# --------------------------------------------------------------------------
-# Geometry
-# --------------------------------------------------------------------------
 
 def spun(name, profile, segments=64):
     """Revolve a 2D profile about Z, like OpenSCAD's rotate_extrude."""
@@ -301,35 +182,352 @@ def spun(name, profile, segments=64):
     return obj
 
 
-def make_spool(index, location):
-    """Body plus thread mass, at the dimensions the peg spacing implies."""
+def drop_to_floor(obj, z=0.0):
+    """Rest an object on a height after it has been rotated."""
+    bpy.context.view_layer.update()
+    lowest = min((obj.matrix_world @ Vector(c)).z for c in obj.bound_box)
+    obj.location.z += z - lowest + CONTACT_LIFT
+
+
+# --------------------------------------------------------------------------
+# Materials
+#
+# Only unambiguously-socketed nodes are used: Math, Color Ramp, Bump, and the
+# texture nodes. ShaderNodeMix carries one A/B pair per data type, so binding
+# its sockets by name can silently pick the wrong pair.
+# --------------------------------------------------------------------------
+
+def _new(nt, kind):
+    return nt.nodes.new(kind)
+
+
+def filament_material(name, colour):
+    """FDM print.
+
+    Walls get layer lines at the real layer pitch. Top-facing surfaces get
+    extrusion beads instead, at nozzle width and running in one direction --
+    a print does not have layer lines on its top faces, and texturing the
+    whole part the same way is what makes a render look like CAD.
+    """
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = nt.nodes["Principled BSDF"]
+    bsdf.inputs["Base Color"].default_value = (*colour, 1)
+    bsdf.inputs["Specular IOR Level"].default_value = 0.4
+    if "Subsurface Weight" in bsdf.inputs:
+        bsdf.inputs["Subsurface Weight"].default_value = 0.02
+        bsdf.inputs["Subsurface Radius"].default_value = (0.5, 0.45, 0.4)
+    if "Sheen Weight" in bsdf.inputs:
+        # Extruded plastic keeps a faint directional sheen off the beads.
+        bsdf.inputs["Sheen Weight"].default_value = 0.08
+        bsdf.inputs["Sheen Roughness"].default_value = 0.5
+
+    co = _new(nt, "ShaderNodeTexCoord")
+    geo = _new(nt, "ShaderNodeNewGeometry")
+
+    # How much this surface faces up: 0 on a wall, 1 on a top face.
+    sep = _new(nt, "ShaderNodeSeparateXYZ")
+    upness = _new(nt, "ShaderNodeMath")
+    upness.operation = "ABSOLUTE"
+    up_ramp = _new(nt, "ShaderNodeMapRange")
+    up_ramp.inputs[1].default_value = 0.55      # from
+    up_ramp.inputs[2].default_value = 0.95      # to
+    nt.links.new(geo.outputs["Normal"], sep.inputs["Vector"])
+    nt.links.new(sep.outputs["Z"], upness.inputs[0])
+    nt.links.new(upness.outputs[0], up_ramp.inputs[0])
+
+    # Wall: bands stacked up Z at the layer pitch.
+    layers = _new(nt, "ShaderNodeTexWave")
+    layers.wave_type = "BANDS"
+    layers.bands_direction = "Z"
+    layers.wave_profile = "SIN"
+    layers.inputs["Scale"].default_value = 1.0 / (LAYER_H * MM * 2)
+    nt.links.new(co.outputs["Object"], layers.inputs["Vector"])
+
+    # Top: extrusion beads at nozzle width, running along one axis.
+    beads = _new(nt, "ShaderNodeTexWave")
+    beads.wave_type = "BANDS"
+    beads.bands_direction = "X"
+    beads.wave_profile = "SIN"
+    beads.inputs["Scale"].default_value = 1.0 / (BEAD_W * MM * 2)
+    nt.links.new(co.outputs["Object"], beads.inputs["Vector"])
+
+    # Blend the two by upness: wall * (1-f) + top * f
+    inv = _new(nt, "ShaderNodeMath")
+    inv.operation = "SUBTRACT"
+    inv.inputs[0].default_value = 1.0
+    nt.links.new(up_ramp.outputs[0], inv.inputs[1])
+
+    wall_w = _new(nt, "ShaderNodeMath")
+    wall_w.operation = "MULTIPLY"
+    nt.links.new(layers.outputs["Fac"], wall_w.inputs[0])
+    nt.links.new(inv.outputs[0], wall_w.inputs[1])
+
+    top_w = _new(nt, "ShaderNodeMath")
+    top_w.operation = "MULTIPLY"
+    nt.links.new(beads.outputs["Fac"], top_w.inputs[0])
+    nt.links.new(up_ramp.outputs[0], top_w.inputs[1])
+
+    struct = _new(nt, "ShaderNodeMath")
+    struct.operation = "ADD"
+    nt.links.new(wall_w.outputs[0], struct.inputs[0])
+    nt.links.new(top_w.outputs[0], struct.inputs[1])
+
+    # Imperfections: the surface is not a perfect extrusion.
+    grain = _new(nt, "ShaderNodeTexNoise")
+    grain.inputs["Scale"].default_value = 1400.0
+    grain.inputs["Detail"].default_value = 8.0
+    nt.links.new(co.outputs["Object"], grain.inputs["Vector"])
+
+    grain_w = _new(nt, "ShaderNodeMath")
+    grain_w.operation = "MULTIPLY"
+    grain_w.inputs[1].default_value = 0.28
+    nt.links.new(grain.outputs["Fac"], grain_w.inputs[0])
+
+    struct_w = _new(nt, "ShaderNodeMath")
+    struct_w.operation = "MULTIPLY"
+    struct_w.inputs[1].default_value = 0.72
+    nt.links.new(struct.outputs[0], struct_w.inputs[0])
+
+    height = _new(nt, "ShaderNodeMath")
+    height.operation = "ADD"
+    nt.links.new(struct_w.outputs[0], height.inputs[0])
+    nt.links.new(grain_w.outputs[0], height.inputs[1])
+
+    bump = _new(nt, "ShaderNodeBump")
+    bump.inputs["Strength"].default_value = 0.6
+    bump.inputs["Distance"].default_value = 0.00016
+    nt.links.new(height.outputs[0], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+
+    # Roughness tracks the same structure, so highlights break along the
+    # beads instead of sitting flat across a face.
+    rough = _new(nt, "ShaderNodeMapRange")
+    rough.inputs[1].default_value = 0.0
+    rough.inputs[2].default_value = 1.0
+    rough.inputs[3].default_value = 0.54
+    rough.inputs[4].default_value = 0.70
+    nt.links.new(height.outputs[0], rough.inputs[0])
+    nt.links.new(rough.outputs[0], bsdf.inputs["Roughness"])
+    return mat
+
+
+def worn_plastic(name, colour, grime=0.55):
+    """Spool body: translucent plastic, dust in the corners, scuffed sides.
+
+    Base colour comes from a ramp driven by ambient occlusion, so the dirt
+    collects where a cloth never reaches -- the flange roots and the bore.
+    """
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    b = nt.nodes["Principled BSDF"]
+    b.inputs["Transmission Weight"].default_value = 0.5
+    b.inputs["IOR"].default_value = 1.48
+
+    ao = _new(nt, "ShaderNodeAmbientOcclusion")
+    ao.inputs["Distance"].default_value = 0.004
+    ao.only_local = True
+
+    ramp = _new(nt, "ShaderNodeValToRGB")
+    dirty = tuple(c * grime for c in colour)
+    ramp.color_ramp.elements[0].position = 0.25
+    ramp.color_ramp.elements[0].color = (*dirty, 1)
+    ramp.color_ramp.elements[1].position = 0.85
+    ramp.color_ramp.elements[1].color = (*colour, 1)
+    nt.links.new(ao.outputs["AO"], ramp.inputs["Fac"])
+    nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
+
+    co = _new(nt, "ShaderNodeTexCoord")
+    scuff = _new(nt, "ShaderNodeTexNoise")
+    scuff.inputs["Scale"].default_value = 260.0
+    scuff.inputs["Detail"].default_value = 7.0
+    nt.links.new(co.outputs["Object"], scuff.inputs["Vector"])
+
+    rough = _new(nt, "ShaderNodeMapRange")
+    rough.inputs[3].default_value = 0.18
+    rough.inputs[4].default_value = 0.62
+    nt.links.new(scuff.outputs["Fac"], rough.inputs[0])
+    nt.links.new(rough.outputs[0], b.inputs["Roughness"])
+
+    bump = _new(nt, "ShaderNodeBump")
+    bump.inputs["Strength"].default_value = 0.12
+    bump.inputs["Distance"].default_value = 0.00006
+    nt.links.new(scuff.outputs["Fac"], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+    return mat
+
+
+def thread_material(name, colour):
+    """Wound thread: fine helical banding, sheen, loose fibre fuzz."""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    b = nt.nodes["Principled BSDF"]
+    if "Sheen Weight" in b.inputs:
+        # Sheen is white retroreflection: crank it and every dyed thread
+        # washes out to pastel, which is what a heavy value did here.
+        b.inputs["Sheen Weight"].default_value = 0.3
+        b.inputs["Sheen Roughness"].default_value = 0.35
+
+    co = _new(nt, "ShaderNodeTexCoord")
+
+    ao = _new(nt, "ShaderNodeAmbientOcclusion")
+    ao.inputs["Distance"].default_value = 0.005
+    ao.only_local = True
+    ramp = _new(nt, "ShaderNodeValToRGB")
+    # Only a mild dirt falloff. Crushing the shadowed side of a wound spool
+    # desaturates the one thing carrying colour in the whole frame.
+    ramp.color_ramp.elements[0].position = 0.15
+    ramp.color_ramp.elements[0].color = (*[c * 0.68 for c in colour], 1)
+    ramp.color_ramp.elements[1].position = 0.75
+    ramp.color_ramp.elements[1].color = (*colour, 1)
+    nt.links.new(ao.outputs["AO"], ramp.inputs["Fac"])
+    nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
+
+    wind = _new(nt, "ShaderNodeTexWave")
+    wind.wave_type = "BANDS"
+    wind.bands_direction = "Z"
+    wind.inputs["Scale"].default_value = 2200.0
+    wind.inputs["Distortion"].default_value = 3.0
+    nt.links.new(co.outputs["Object"], wind.inputs["Vector"])
+
+    fuzz = _new(nt, "ShaderNodeTexNoise")
+    fuzz.inputs["Scale"].default_value = 2600.0
+    fuzz.inputs["Detail"].default_value = 9.0
+    nt.links.new(co.outputs["Object"], fuzz.inputs["Vector"])
+
+    a = _new(nt, "ShaderNodeMath")
+    a.operation = "MULTIPLY"
+    a.inputs[1].default_value = 0.6
+    nt.links.new(wind.outputs["Fac"], a.inputs[0])
+    c = _new(nt, "ShaderNodeMath")
+    c.operation = "MULTIPLY"
+    c.inputs[1].default_value = 0.4
+    nt.links.new(fuzz.outputs["Fac"], c.inputs[0])
+    h = _new(nt, "ShaderNodeMath")
+    h.operation = "ADD"
+    nt.links.new(a.outputs[0], h.inputs[0])
+    nt.links.new(c.outputs[0], h.inputs[1])
+
+    bump = _new(nt, "ShaderNodeBump")
+    bump.inputs["Strength"].default_value = 0.45
+    bump.inputs["Distance"].default_value = 0.00003
+    nt.links.new(h.outputs[0], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+
+    b.inputs["Roughness"].default_value = 0.62
+    return mat
+
+
+def wood_material(name):
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    b = nt.nodes["Principled BSDF"]
+    b.inputs["Roughness"].default_value = 0.42
+
+    co = _new(nt, "ShaderNodeTexCoord")
+    stretch = _new(nt, "ShaderNodeMapping")
+    stretch.inputs["Scale"].default_value = (1.0, 0.06, 1.0)
+    nt.links.new(co.outputs["Object"], stretch.inputs["Vector"])
+
+    grain = _new(nt, "ShaderNodeTexNoise")
+    grain.inputs["Scale"].default_value = 14.0
+    grain.inputs["Detail"].default_value = 9.0
+    nt.links.new(stretch.outputs["Vector"], grain.inputs["Vector"])
+
+    ramp = _new(nt, "ShaderNodeValToRGB")
+    ramp.color_ramp.elements[0].position = 0.32
+    ramp.color_ramp.elements[0].color = (0.105, 0.055, 0.028, 1)
+    ramp.color_ramp.elements[1].position = 0.72
+    ramp.color_ramp.elements[1].color = (0.24, 0.135, 0.070, 1)
+    nt.links.new(grain.outputs["Fac"], ramp.inputs["Fac"])
+    nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
+
+    bump = _new(nt, "ShaderNodeBump")
+    bump.inputs["Strength"].default_value = 0.18
+    bump.inputs["Distance"].default_value = 0.0004
+    nt.links.new(grain.outputs["Fac"], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+    return mat
+
+
+def cutting_mat_material(name):
+    """Self healing mat: dark green, faint grid, low sheen."""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    b = nt.nodes["Principled BSDF"]
+    b.inputs["Roughness"].default_value = 0.68
+
+    co = _new(nt, "ShaderNodeTexCoord")
+    gx = _new(nt, "ShaderNodeTexWave")
+    gx.wave_type = "BANDS"
+    gx.bands_direction = "X"
+    gx.wave_profile = "SAW"
+    gx.inputs["Scale"].default_value = 20.0
+    nt.links.new(co.outputs["Object"], gx.inputs["Vector"])
+    gy = _new(nt, "ShaderNodeTexWave")
+    gy.wave_type = "BANDS"
+    gy.bands_direction = "Y"
+    gy.wave_profile = "SAW"
+    gy.inputs["Scale"].default_value = 20.0
+    nt.links.new(co.outputs["Object"], gy.inputs["Vector"])
+
+    lines = _new(nt, "ShaderNodeMath")
+    lines.operation = "MAXIMUM"
+    nt.links.new(gx.outputs["Fac"], lines.inputs[0])
+    nt.links.new(gy.outputs["Fac"], lines.inputs[1])
+
+    ramp = _new(nt, "ShaderNodeValToRGB")
+    ramp.color_ramp.elements[0].position = 0.90
+    ramp.color_ramp.elements[0].color = (0.020, 0.043, 0.030, 1)
+    ramp.color_ramp.elements[1].position = 0.985
+    ramp.color_ramp.elements[1].color = (0.075, 0.115, 0.085, 1)
+    nt.links.new(lines.outputs[0], ramp.inputs["Fac"])
+    nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
+    return mat
+
+
+def flat_material(name, colour, roughness=0.7):
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    b = mat.node_tree.nodes["Principled BSDF"]
+    b.inputs["Base Color"].default_value = (*colour, 1)
+    b.inputs["Roughness"].default_value = roughness
+    return mat
+
+
+# --------------------------------------------------------------------------
+# Geometry
+# --------------------------------------------------------------------------
+
+def make_spool(index, location, rotation=None):
     fr, cr, br = SP_FLANGE_D / 2, SP_CORE_D / 2, SP_BORE_D / 2
     ft = SP_FLANGE_T
-    body_profile = [
+    body = spun("spool_body_%d" % index, [
         (br, 0), (fr, 0), (fr, ft), (cr, ft),
         (cr, SP_H - ft), (fr, SP_H - ft), (fr, SP_H), (br, SP_H), (br, 0),
-    ]
-    body = spun("spool_body_%d" % index, body_profile)
-    body.data.materials.append(plastic_material(
-        "spool_plastic_%d" % index, (0.92, 0.91, 0.88), translucent=True))
+    ])
+    body.data.materials.append(worn_plastic(
+        "spool_plastic_%d" % index, (0.80, 0.79, 0.74)))
 
     tr = SP_THREAD_D / 2
-    thread_profile = [
-        (cr, ft + 0.2), (tr, ft + 0.6), (tr, SP_H - ft - 0.6),
-        (cr, SP_H - ft - 0.2),
-    ]
-    thread = spun("spool_thread_%d" % index, thread_profile)
-    colour = THREAD_COLOURS[index % len(THREAD_COLOURS)]
+    thread = spun("spool_thread_%d" % index, [
+        (cr, ft + 0.2), (tr, ft + 0.7), (tr, SP_H - ft - 0.7), (cr, SP_H - ft - 0.2),
+    ])
+    colour = THREAD_COLOURS[(index * 7) % len(THREAD_COLOURS)]
     thread.data.materials.append(thread_material("thread_%d" % index, colour))
 
     for o in (body, thread):
         o.location = location
-        o.rotation_euler = (0, 0, (index * 37) % 360 * math.pi / 180)
+        o.rotation_euler = rotation or (0, 0, math.radians((index * 53) % 360))
     return body, thread
 
 
 def peg_positions():
-    """Same lattice the model generates: hex packed, columns along Y."""
     col_spacing = SPOOL_SPACING * math.sqrt(3) / 2
     span_x = (PITCH * GRID_X - GAP) - 2 * WALL - SPOOL_SPACING
     span_y = (PITCH * GRID_Y - GAP) - 2 * WALL - SPOOL_SPACING
@@ -345,144 +543,138 @@ def peg_positions():
     return [(x - ox, y - oy) for x, y in pts]
 
 
-def import_bin(name="bin"):
+def import_bin(name="bin", z=REST):
     before = set(bpy.data.objects)
     bpy.ops.wm.stl_import(filepath=STL, global_scale=MM)
     obj = (set(bpy.data.objects) - before).pop()
     obj.name = name
+    obj.location.z = z          # never coplanar with what it rests on
 
-    # Printed edges are never perfectly sharp; a small bevel catches light
-    # along every corner and is most of what sells the material.
     bev = obj.modifiers.new("bevel", "BEVEL")
     bev.width = 0.00018
     bev.segments = 2
     bev.limit_method = "ANGLE"
     bev.angle_limit = math.radians(35)
     bev.harden_normals = True
-    # Flat shading: the bin is all flats and chamfers, and the bevel modifier
-    # supplies the only rounding that should catch light. Smoothing it would
-    # blur the crisp 45 degree base profile into something that reads as
-    # moulded rather than printed.
     obj.data.materials.append(filament_material("pla_" + name, FILAMENT))
     return obj
 
 
-def load_spools(bin_obj, z_offset=0.0, limit=None):
-    """Drop a spool onto every peg, seated on the bin floor."""
-    floor_z = (BASE_H + FLOOR_T) * MM + z_offset
+def load_spools(z_base):
     made = []
     for i, (x, y) in enumerate(peg_positions()):
-        if limit is not None and i >= limit:
-            break
-        made += list(make_spool(i, (x * MM, y * MM, floor_z)))
+        made += list(make_spool(i, (x * MM, y * MM, z_base)))
     return made
+
+
+# --------------------------------------------------------------------------
+# The craft room
+# --------------------------------------------------------------------------
+
+def craft_room(scene, props=True):
+    """Workbench, cutting mat, and a background that reads as a sewing room.
+
+    The background is deliberately coarse: at the working apertures it is
+    metres behind the subject and never resolves, so it only has to carry
+    colour and silhouette.
+    """
+    table = box("table", (3.0, 2.4, 0.04), (0, 0.35, -0.02))
+    table.data.materials.append(wood_material("oak"))
+
+    mat = box("cutting_mat", (0.62, 0.46, MAT_TOP), (0, 0, MAT_TOP / 2),
+              bevel=0.0015)
+    mat.data.materials.append(cutting_mat_material("mat"))
+
+    wall = box("wall", (4.0, 0.06, 2.6), (0, 1.15, 1.0))
+    wall.data.materials.append(flat_material("wall", (0.30, 0.27, 0.24), 0.85))
+
+    if props:
+        # Folded fabric, stacked at the back of the bench.
+        bolts = [
+            ((0.30, 0.16, 0.055), (-0.44, 0.60, 0.028), (0.20, 0.10, 0.13)),
+            ((0.29, 0.15, 0.050), (-0.42, 0.60, 0.081), (0.42, 0.30, 0.22)),
+            ((0.28, 0.15, 0.048), (-0.46, 0.60, 0.130), (0.12, 0.16, 0.20)),
+            ((0.26, 0.14, 0.052), (0.46, 0.66, 0.026), (0.36, 0.14, 0.16)),
+            ((0.25, 0.14, 0.046), (0.44, 0.66, 0.075), (0.55, 0.42, 0.28)),
+        ]
+        for i, (size, loc, col) in enumerate(bolts):
+            b = box("bolt_%d" % i, size, loc, rotation=(0, 0, math.radians(4 * i)),
+                    bevel=0.006)
+            b.data.materials.append(flat_material("fabric_%d" % i, col, 0.9))
+
+        jar = cyl("jar", 0.045, 0.11, (0.30, 0.40, 0.055))
+        jar.data.materials.append(flat_material("jar", (0.5, 0.5, 0.52), 0.15))
+
+        # A few spools loose on the bench, well behind the subject.
+        for i, (x, y) in enumerate([(-0.24, 0.30), (-0.20, 0.36), (0.16, 0.34)]):
+            make_spool(200 + i, (x, y, REST))
+
+    # Window light: big, warm, low, from the left.
+    area_light("window", (-1.5, -0.55, 1.05), (0, 0.02, 0.05),
+               (1.5, 1.9), 150, (1.0, 0.94, 0.84))
+    # Cool bounce from the room.
+    area_light("bounce", (1.5, -0.75, 0.55), (0, 0, 0.04),
+               (1.8, 1.4), 22, (0.82, 0.88, 1.0))
+    # Soft top to keep the interior of the bin readable.
+    area_light("top", (-0.15, -0.15, 1.5), (0, 0, 0.05),
+               (1.2, 1.2), 40, (1.0, 0.97, 0.92))
 
 
 # --------------------------------------------------------------------------
 # Shots
 # --------------------------------------------------------------------------
 
-def three_point(scene, key_energy=70, size=(1.6, 1.2)):
-    """Softbox energies are in watts and the falloff is physical, so these are
-    much smaller numbers than they look. The first pass used 900W and blew a
-    0.055 albedo to near white."""
-    area_light("key", (-1.1, -1.4, 1.5), (0, 0, 0.05), size, key_energy,
-               (1.0, 0.97, 0.93))
-    area_light("fill", (1.6, -0.9, 0.6), (0, 0, 0.05), (1.8, 1.4), 20,
-               (0.90, 0.94, 1.0))
-    area_light("rim", (0.7, 1.5, 1.1), (0, 0, 0.06), (1.2, 0.9), 32,
-               (0.95, 0.97, 1.0))
-
-
-def loose_spools(start=40):
-    """A few spools outside the bin: one on its side showing the wound thread,
-    two upright. Loaded from above, every spool reads as a blank disc, so the
-    story of what the bin is for has to be told beside it."""
-    # Kept beside the bin rather than in front of it. Closer to the lens than
-    # the subject means both bigger in frame and outside the focal plane.
-    body, thread = make_spool(start, (0.100, -0.018, SP_FLANGE_D / 2 * MM))
-    for o in (body, thread):
-        o.rotation_euler = (math.radians(90), 0, math.radians(24))
-    make_spool(start + 3, (0.128, 0.020, 0.0))
-    make_spool(start + 6, (0.092, -0.058, 0.0))
-
-
 def shot_hero(loaded):
     scene = reset_scene()
-    world_backdrop(scene)
-    sweep()
-    b = import_bin()
+    craft_room(scene)
+    import_bin()
     if loaded:
-        load_spools(b)
-        loose_spools()
-    three_point(scene)
-    camera(scene, (0.36, -0.42, 0.22), (0.012, -0.010, 0.026), lens=85, fstop=11)
+        load_spools(REST + (BASE_H + FLOOR_T) * MM)
+        # Beside the bin, not in front of it: closer to the lens than the
+        # subject means both bigger in frame and outside the focal plane.
+        make_spool(41, (0.106, -0.012, REST + SP_FLANGE_D / 2 * MM),
+                   rotation=(math.radians(90), 0, math.radians(18)))
+        make_spool(44, (0.132, 0.030, REST))
+        make_spool(47, (0.088, -0.055, REST))
+    camera(scene, (0.34, -0.40, 0.21), (0.010, -0.012, 0.026), lens=85, fstop=12)
     return "hero_loaded" if loaded else "hero_empty"
 
 
 def shot_stacked():
     scene = reset_scene()
-    world_backdrop(scene)
-    sweep()
+    craft_room(scene)
     import_bin("bin_lower")
-    upper = import_bin("bin_upper")
-    # Exactly the verified stack pitch, so the render shows the real seat.
-    upper.location = (0, 0, STACK_PITCH * MM)
-    # Load the upper bin, not the lower one: the lower bin's contents are
-    # hidden by the bin sitting on it, so filling it only costs render time.
-    load_spools(upper, z_offset=STACK_PITCH * MM)
-    three_point(scene)
-    camera(scene, (0.44, -0.50, 0.30), (0, 0, 0.050), lens=80, fstop=14)
+    import_bin("bin_upper", z=REST + STACK_PITCH * MM)
+    # Load the upper bin: the lower one's contents are hidden by the bin on it.
+    load_spools(REST + STACK_PITCH * MM + (BASE_H + FLOOR_T) * MM)
+    camera(scene, (0.42, -0.48, 0.30), (0, 0, 0.052), lens=80, fstop=13)
     return "stacked"
 
 
 def shot_topdown(loaded):
     scene = reset_scene()
-    world_backdrop(scene, 0.5)
-    sweep()
-    b = import_bin()
+    craft_room(scene, props=False)
+    import_bin()
     if loaded:
-        load_spools(b)
-    area_light("top", (-0.35, -0.35, 0.9), (0, 0, 0.03), (2.2, 2.2), 45)
-    area_light("side", (0.6, 0.2, 0.35), (0, 0, 0.03), (1.2, 1.2), 12)
-    # A few degrees off vertical rather than dead overhead. Straight down, a
-    # spool is only its top flange and the wound colour never shows.
+        load_spools(REST + (BASE_H + FLOOR_T) * MM)
+    area_light("overhead", (-0.30, -0.30, 1.0), (0, 0, 0.03), (2.0, 2.0), 90)
+    # A few degrees off vertical: straight down, a spool is only its top
+    # flange and the wound colour never shows.
     camera(scene, (0.035, -0.145, 0.60), (0, 0, 0.012), lens=70)
     return "topdown_loaded" if loaded else "topdown_empty"
 
 
-def drop_to_floor(obj):
-    """Rest an object on z=0 after it has been rotated."""
-    bpy.context.view_layer.update()
-    lowest = min((obj.matrix_world @ Vector(c)).z for c in obj.bound_box)
-    obj.location.z -= lowest
-
-
 def shot_macro():
-    """Tipped up onto its back so the gridfinity feet face the camera.
-
-    A close crop of the wall shows the layer lines but says nothing about
-    what the part is. The feet are the proof it drops into a baseplate, and
-    the profile that took the most measuring to get right.
-    """
+    """Tipped up so the gridfinity feet face the camera."""
     scene = reset_scene()
-    world_backdrop(scene, 0.3)
-    sweep()
+    craft_room(scene, props=False)
     b = import_bin()
     # Negative X: the underside normal is -Z, and a positive rotation swings
     # it away from the camera, showing the open top instead of the feet.
     b.rotation_euler = (math.radians(-76), 0, math.radians(-22))
-    drop_to_floor(b)
-    # Raking light across the feet: the 45 degree chamfers only read if the
-    # key is low enough to throw a shadow down each groove.
-    area_light("key", (-0.50, -0.60, 0.34), (0, -0.02, 0.08),
-               (0.9, 0.7), 9, (1.0, 0.96, 0.92))
-    area_light("rim", (0.52, -0.16, 0.28), (0, -0.02, 0.08),
-               (0.6, 0.5), 3.5, (0.9, 0.95, 1.0))
-    # Far enough back to hold the whole base. The first attempt sat 130mm away
-    # on a 110mm lens at f/3.2 and returned a wall of out-of-focus grey.
-    # Tipped up the part stands 167mm tall, so the lens needs roughly 0.75m
-    # to hold all of it: vertical coverage is (24/lens) * distance.
+    drop_to_floor(b, MAT_TOP)
+    area_light("rake", (-0.55, -0.65, 0.36), (0, -0.02, 0.08),
+               (0.9, 0.7), 16, (1.0, 0.95, 0.88))
     camera(scene, (0.17, -0.74, 0.17), (0, 0, 0.085), lens=80, fstop=11)
     return "macro_base_lip"
 
@@ -500,11 +692,9 @@ SHOTS = {
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     wanted = argv if argv else list(SHOTS)
-
     os.makedirs(OUT, exist_ok=True)
     if not os.path.exists(STL):
         raise SystemExit("missing %s -- run `make bin` first" % STL)
-
     for key in wanted:
         if key not in SHOTS:
             raise SystemExit("unknown shot %r; have %s" % (key, ", ".join(SHOTS)))
