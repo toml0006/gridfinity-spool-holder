@@ -104,6 +104,12 @@ def reset_scene():
     scene.render.engine = "CYCLES"
     scene.cycles.samples = SAMPLES
     scene.cycles.use_denoising = True
+    # Cycles' pixel filter is the real anti-aliasing lever and it defaults to
+    # 1.5px. Widening it makes each pixel integrate a larger neighbourhood of
+    # sub-pixel samples, which is what suppresses aliasing at the source --
+    # moire cannot be removed afterwards, because once it exists it is
+    # indistinguishable from real detail at that frequency.
+    scene.render.filter_size = 2.2
     scene.render.resolution_x = RES[0] * SUPERSAMPLE
     scene.render.resolution_y = RES[1] * SUPERSAMPLE
     scene.view_settings.view_transform = "AgX"
@@ -186,9 +192,12 @@ def phone_look(scene):
 
     # Phone sharpening is unmistakable and heavier than anyone would apply by
     # hand. Two-thirds strength here because the render is already clean.
+    # Sharpening is the last thing a moire-prone image needs: it is a high
+    # pass, so it amplifies exactly the frequencies that are aliasing. The
+    # phone look loses a little bite; the surface gains far more.
     sharp = nt.nodes.new("CompositorNodeFilter")
     sharp.filter_type = "SHARPEN"
-    sharp.inputs["Fac"].default_value = 0.18
+    sharp.inputs["Fac"].default_value = 0.0
 
     nt.links.new(rl.outputs["Image"], lens.inputs["Image"])
     nt.links.new(lens.outputs["Image"], tone.inputs["Image"])
@@ -1238,14 +1247,31 @@ SHOTS = {
 }
 
 
-def downsample(path, size):
-    """Box-filter the oversized render down to delivery size."""
+def downsample(path, size, factor):
+    """Average each factor x factor block down to one delivered pixel.
+
+    Image.scale() resamples with a cheap kernel that does not integrate every
+    sub-pixel -- which throws away most of the benefit of rendering large in
+    the first place. This averages the exact block, in linear light, which is
+    the correct way to combine radiance samples.
+    """
+    import numpy as np
+
     img = bpy.data.images.load(path)
-    img.scale(size[0], size[1])
-    img.filepath_raw = path
-    img.file_format = "PNG"
-    img.save()
+    w, h = img.size
+    buf = np.empty(w * h * 4, dtype=np.float32)
+    img.pixels.foreach_get(buf)
+    block = buf.reshape(h, w, 4).reshape(
+        size[1], factor, size[0], factor, 4).mean(axis=(1, 3))
+
+    out = bpy.data.images.new("ds", size[0], size[1], alpha=True,
+                              float_buffer=True)
+    out.pixels.foreach_set(block.reshape(-1))
+    out.filepath_raw = path
+    out.file_format = "PNG"
+    out.save()
     bpy.data.images.remove(img)
+    bpy.data.images.remove(out)
 
 
 def main():
@@ -1262,7 +1288,7 @@ def main():
         bpy.context.scene.render.filepath = path
         bpy.ops.render.render(write_still=True)
         if SUPERSAMPLE > 1:
-            downsample(path, RES)
+            downsample(path, RES, SUPERSAMPLE)
         print("RENDERED %s" % path)
 
 
