@@ -62,7 +62,7 @@ SP_BORE_D = 6.4
 SP_THREAD_D = 23.4
 
 FILAMENT = (0.052, 0.055, 0.062)       # matte dark grey PLA, linear
-LAYER_H = 0.2                          # print layer height, mm
+LAYER_H = 0.28                         # print layer height, mm
 BEAD_W = 0.42                          # extrusion width on top surfaces, mm
 
 MAT_TOP = 0.003                        # cutting mat thickness
