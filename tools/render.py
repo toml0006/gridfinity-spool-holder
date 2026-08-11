@@ -119,12 +119,27 @@ def reset_scene():
 
     prefs = bpy.context.preferences.addons["cycles"].preferences
     try:
-        prefs.compute_device_type = "METAL"
-        prefs.get_devices()
-        for d in prefs.devices:
-            d.use = True
-        scene.cycles.device = "GPU"
-    except Exception:
+        # Try each backend rather than hardcoding one. METAL only exists on
+        # Apple silicon, so on an NVIDIA box this silently fell through to the
+        # CPU branch -- a 3090 sat at 0% while Cycles ground away on cores.
+        # OPTIX before CUDA: it uses the RT cores, which is the whole point.
+        chosen = None
+        for backend in ("OPTIX", "CUDA", "METAL", "HIP", "ONEAPI"):
+            try:
+                prefs.compute_device_type = backend
+            except Exception:
+                continue
+            prefs.get_devices()
+            usable = [d for d in prefs.devices if d.type == backend]
+            if usable:
+                for d in prefs.devices:
+                    d.use = (d.type == backend)
+                chosen = backend
+                break
+        scene.cycles.device = "GPU" if chosen else "CPU"
+        print("cycles backend: %s" % (chosen or "CPU"))
+    except Exception as exc:
+        print("cycles backend fell back to CPU: %s" % exc)
         scene.cycles.device = "CPU"
 
     phone_look(scene)
