@@ -755,11 +755,53 @@ def thread_material(name, colour):
     nt.links.new(wrap, height.inputs[0])
     nt.links.new(tw_scaled.outputs[0], height.inputs[1])
 
+    # Loose fibre. Polyester is smooth, but a wound spool that has been
+    # handled has strays catching light, finer than the ply grooves.
+    fuzz = _new(nt, "ShaderNodeTexNoise")
+    fuzz.inputs["Scale"].default_value = 5200.0
+    fuzz.inputs["Detail"].default_value = 8.0
+    nt.links.new(co.outputs["Object"], fuzz.inputs["Vector"])
+    fuzz_w = _new(nt, "ShaderNodeMath")
+    fuzz_w.operation = "MULTIPLY"
+    fuzz_w.inputs[1].default_value = 0.18
+    nt.links.new(fuzz.outputs["Fac"], fuzz_w.inputs[0])
+    total = _new(nt, "ShaderNodeMath")
+    total.operation = "ADD"
+    nt.links.new(height.outputs[0], total.inputs[0])
+    nt.links.new(fuzz_w.outputs[0], total.inputs[1])
+
     bump = _new(nt, "ShaderNodeBump")
     bump.inputs["Strength"].default_value = 1.0
     bump.inputs["Distance"].default_value = 0.00024
-    nt.links.new(height.outputs[0], bump.inputs["Height"])
+    nt.links.new(total.outputs[0], bump.inputs["Height"])
     nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+
+    # Grime. Dust settles in the grooves between wraps, where nothing wipes
+    # it away, so the dirt map is ambient occlusion rather than noise: it
+    # lands where the geometry actually traps it.
+    ao = _new(nt, "ShaderNodeAmbientOcclusion")
+    ao.inputs["Distance"].default_value = 0.0009
+    ao.only_local = True
+    dirt = _new(nt, "ShaderNodeValToRGB")
+    grimy = tuple(c * 0.42 + 0.030 for c in colour)
+    dirt.color_ramp.elements[0].position = 0.12
+    dirt.color_ramp.elements[0].color = (*grimy, 1)
+    dirt.color_ramp.elements[1].position = 0.78
+    dirt.color_ramp.elements[1].color = (*colour, 1)
+    nt.links.new(ao.outputs["AO"], dirt.inputs["Fac"])
+    nt.links.new(dirt.outputs["Color"], b.inputs["Base Color"])
+
+    # Dust kills sheen unevenly, so roughness drifts in broad patches rather
+    # than sitting flat across the whole package.
+    dusty = _new(nt, "ShaderNodeTexNoise")
+    dusty.inputs["Scale"].default_value = 320.0
+    dusty.inputs["Detail"].default_value = 3.0
+    nt.links.new(co.outputs["Object"], dusty.inputs["Vector"])
+    rough = _new(nt, "ShaderNodeMapRange")
+    rough.inputs[3].default_value = 0.38
+    rough.inputs[4].default_value = 0.60
+    nt.links.new(dusty.outputs["Fac"], rough.inputs[0])
+    nt.links.new(rough.outputs[0], b.inputs["Roughness"])
 
     # Anisotropy along the cord, which here is the circumferential direction:
     # (-y, x, 0) / r. That is what draws the horizontal satin band.
