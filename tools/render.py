@@ -250,6 +250,57 @@ def _bead_lobe(nt, coord_socket, axis, pitch_mm):
     return h.outputs[0]
 
 
+def _layer_phase(nt, coord_socket, axis, pitch_mm):
+    """Returns (layer_index, arc_profile) for a row of beads.
+
+    The integer layer index matters as much as the profile: flow character is
+    coherent along a whole layer, so per-layer variation has to be keyed to
+    it. Driving variation from 3D noise instead gives rough plastic, not
+    extrusion.
+    """
+    sep = _new(nt, "ShaderNodeSeparateXYZ")
+    nt.links.new(coord_socket, sep.inputs["Vector"])
+
+    q = _new(nt, "ShaderNodeMath")
+    q.operation = "DIVIDE"
+    q.inputs[1].default_value = pitch_mm * MM
+    nt.links.new(sep.outputs[axis], q.inputs[0])
+
+    layer = _new(nt, "ShaderNodeMath")
+    layer.operation = "FLOOR"
+    nt.links.new(q.outputs[0], layer.inputs[0])
+
+    phase = _new(nt, "ShaderNodeMath")
+    phase.operation = "FRACT"
+    nt.links.new(q.outputs[0], phase.inputs[0])
+
+    u = _new(nt, "ShaderNodeMath")
+    u.operation = "MULTIPLY_ADD"
+    u.inputs[1].default_value = 2.0
+    u.inputs[2].default_value = -1.0
+    nt.links.new(phase.outputs[0], u.inputs[0])
+
+    u2 = _new(nt, "ShaderNodeMath")
+    u2.operation = "POWER"
+    u2.inputs[1].default_value = 2.0
+    nt.links.new(u.outputs[0], u2.inputs[0])
+
+    inner = _new(nt, "ShaderNodeMath")
+    inner.operation = "SUBTRACT"
+    inner.inputs[0].default_value = 1.0
+    nt.links.new(u2.outputs[0], inner.inputs[1])
+
+    clamped = _new(nt, "ShaderNodeMath")
+    clamped.operation = "MAXIMUM"
+    clamped.inputs[1].default_value = 0.0
+    nt.links.new(inner.outputs[0], clamped.inputs[0])
+
+    prof = _new(nt, "ShaderNodeMath")
+    prof.operation = "SQRT"
+    nt.links.new(clamped.outputs[0], prof.inputs[0])
+    return layer.outputs[0], prof.outputs[0]
+
+
 def filament_material(name, colour, displace=False):
     """FDM print surface.
 
@@ -266,43 +317,63 @@ def filament_material(name, colour, displace=False):
     mat.use_nodes = True
     nt = mat.node_tree
     bsdf = nt.nodes["Principled BSDF"]
-    bsdf.inputs["Specular IOR Level"].default_value = 0.42
-    if "Subsurface Weight" in bsdf.inputs:
-        # PLA is not a pure opaque dielectric; thin walls glow slightly.
-        bsdf.inputs["Subsurface Weight"].default_value = 0.035
-        bsdf.inputs["Subsurface Radius"].default_value = (0.8, 0.7, 0.6)
-    if "Anisotropic" in bsdf.inputs:
-        # Each bead is a cylinder lying on its side, so highlights stretch
-        # along the bead rather than forming round specular dots.
-        # Enough to stretch a highlight along the bead, not so much that matte
-        # PLA starts reading as brushed metal.
-        bsdf.inputs["Anisotropic"].default_value = 0.3
-        tangent = _new(nt, "ShaderNodeTangent")
-        tangent.direction_type = "RADIAL"
-        tangent.axis = "Z"
-        nt.links.new(tangent.outputs["Tangent"], bsdf.inputs["Tangent"])
+    bsdf.inputs["Base Color"].default_value = (*colour, 1)
+
+    # Rough dielectric over a pigmented body. PLA's visible-light IOR is about
+    # 1.45-1.48. Subsurface, sheen and anisotropy all start at zero: real
+    # displaced beads already produce directional highlights, so anisotropy on
+    # top double counts, and dark pigmented PLA reads more credibly without
+    # the waxiness subsurface introduces.
+    bsdf.inputs["IOR"].default_value = 1.46
+    bsdf.inputs["Metallic"].default_value = 0.0
+    for opt, val in (("Subsurface Weight", 0.0), ("Sheen Weight", 0.0),
+                     ("Anisotropic", 0.0), ("Coat Weight", 0.0)):
+        if opt in bsdf.inputs:
+            bsdf.inputs[opt].default_value = val
 
     co = _new(nt, "ShaderNodeTexCoord")
     geo = _new(nt, "ShaderNodeNewGeometry")
 
-    # How much this surface faces up: 0 on a wall, 1 on a top face.
+    # Object space, with scale applied at import, IS print space: the model was
+    # authored in its print orientation, so object Z is build height and the
+    # pattern stays correct when the part is tipped up for a shot.
     nsep = _new(nt, "ShaderNodeSeparateXYZ")
     upness = _new(nt, "ShaderNodeMath")
     upness.operation = "ABSOLUTE"
     up_ramp = _new(nt, "ShaderNodeMapRange")
-    up_ramp.inputs[1].default_value = 0.5
+    up_ramp.inputs[1].default_value = 0.55
     up_ramp.inputs[2].default_value = 0.9
     nt.links.new(geo.outputs["Normal"], nsep.inputs["Vector"])
     nt.links.new(nsep.outputs["Z"], upness.inputs[0])
     nt.links.new(upness.outputs[0], up_ramp.inputs[0])
 
-    wall_h = _bead_lobe(nt, co.outputs["Object"], "Z", LAYER_H)
+    layer_idx, wall_prof = _layer_phase(nt, co.outputs["Object"], "Z", LAYER_H)
 
-    # Top beads run at 45 degrees, which is how a slicer fills a surface.
+    # Flow character is coherent along a whole layer, so amplitude is keyed to
+    # the integer layer index. Driving it from 3D noise instead gives rough
+    # plastic rather than extrusion. +/-12%.
+    lay_noise = _new(nt, "ShaderNodeTexWhiteNoise")
+    lay_noise.noise_dimensions = "1D"
+    nt.links.new(layer_idx, lay_noise.inputs["W"])
+    lay_amp = _new(nt, "ShaderNodeMapRange")
+    lay_amp.inputs[3].default_value = 0.88
+    lay_amp.inputs[4].default_value = 1.12
+    nt.links.new(lay_noise.outputs["Value"], lay_amp.inputs[0])
+
+    wall_h = _new(nt, "ShaderNodeMath")
+    wall_h.operation = "MULTIPLY"
+    nt.links.new(wall_prof, wall_h.inputs[0])
+    nt.links.new(lay_amp.outputs[0], wall_h.inputs[1])
+
+    # Top skin is shallower than the walls: 10-35um against 40-55um.
     spin = _new(nt, "ShaderNodeMapping")
     spin.inputs["Rotation"].default_value = (0, 0, math.radians(45))
     nt.links.new(co.outputs["Object"], spin.inputs["Vector"])
-    top_h = _bead_lobe(nt, spin.outputs["Vector"], "X", BEAD_W)
+    _, top_prof = _layer_phase(nt, spin.outputs["Vector"], "X", BEAD_W)
+    top_h = _new(nt, "ShaderNodeMath")
+    top_h.operation = "MULTIPLY"
+    top_h.inputs[1].default_value = 0.4
+    nt.links.new(top_prof, top_h.inputs[0])
 
     inv = _new(nt, "ShaderNodeMath")
     inv.operation = "SUBTRACT"
@@ -311,86 +382,67 @@ def filament_material(name, colour, displace=False):
 
     wall_w = _new(nt, "ShaderNodeMath")
     wall_w.operation = "MULTIPLY"
-    nt.links.new(wall_h, wall_w.inputs[0])
+    nt.links.new(wall_h.outputs[0], wall_w.inputs[0])
     nt.links.new(inv.outputs[0], wall_w.inputs[1])
 
     top_w = _new(nt, "ShaderNodeMath")
     top_w.operation = "MULTIPLY"
-    nt.links.new(top_h, top_w.inputs[0])
+    nt.links.new(top_h.outputs[0], top_w.inputs[0])
     nt.links.new(up_ramp.outputs[0], top_w.inputs[1])
-
-    struct = _new(nt, "ShaderNodeMath")
-    struct.operation = "ADD"
-    nt.links.new(wall_w.outputs[0], struct.inputs[0])
-    nt.links.new(top_w.outputs[0], struct.inputs[1])
-
-    # Extrusion wobbles: flow is never perfectly even, so bead height drifts
-    # slowly along its length.
-    wobble = _new(nt, "ShaderNodeTexNoise")
-    wobble.inputs["Scale"].default_value = 55.0
-    wobble.inputs["Detail"].default_value = 5.0
-    nt.links.new(co.outputs["Object"], wobble.inputs["Vector"])
-    wob_w = _new(nt, "ShaderNodeMath")
-    wob_w.operation = "MULTIPLY"
-    wob_w.inputs[1].default_value = 0.26
-    nt.links.new(wobble.outputs["Fac"], wob_w.inputs[0])
-
-    struct_w = _new(nt, "ShaderNodeMath")
-    struct_w.operation = "MULTIPLY"
-    struct_w.inputs[1].default_value = 0.74
-    nt.links.new(struct.outputs[0], struct_w.inputs[0])
 
     height = _new(nt, "ShaderNodeMath")
     height.operation = "ADD"
-    nt.links.new(struct_w.outputs[0], height.inputs[0])
-    nt.links.new(wob_w.outputs[0], height.inputs[1])
+    nt.links.new(wall_w.outputs[0], height.inputs[0])
+    nt.links.new(top_w.outputs[0], height.inputs[1])
 
-    # Micro texture of the filament itself, far finer than a bead.
+    # ---- three deliberately uncorrelated signals ----
+    #
+    # Feeding one waveform into displacement, roughness AND base colour is
+    # what gives every layer an identical bright crest and black groove. Real
+    # prints have related but not identical geometry, micro-roughness and
+    # pigment. So: layer envelope drives displacement only, a fine noise
+    # drives bump only, a broad noise drives roughness only. Nothing drives
+    # base colour, and there is no cavity darkening -- lighting makes the
+    # grooves, not a ramp.
+
     micro = _new(nt, "ShaderNodeTexNoise")
-    micro.inputs["Scale"].default_value = 9000.0
-    micro.inputs["Detail"].default_value = 6.0
+    micro.inputs["Scale"].default_value = 22000.0        # ~45um features
+    micro.inputs["Detail"].default_value = 5.0
     nt.links.new(co.outputs["Object"], micro.inputs["Vector"])
-
     micro_bump = _new(nt, "ShaderNodeBump")
-    micro_bump.inputs["Strength"].default_value = 0.12
-    micro_bump.inputs["Distance"].default_value = 0.000004
+    micro_bump.inputs["Strength"].default_value = 0.35
+    micro_bump.inputs["Distance"].default_value = 0.0000025   # 2.5um
     nt.links.new(micro.outputs["Fac"], micro_bump.inputs["Height"])
 
-    bump = _new(nt, "ShaderNodeBump")
-    # Real bead relief is a few hundredths of a millimetre, not tenths.
-    bump.inputs["Strength"].default_value = 0.85
-    bump.inputs["Distance"].default_value = 0.000026
-    nt.links.new(height.outputs[0], bump.inputs["Height"])
-    nt.links.new(micro_bump.outputs["Normal"], bump.inputs["Normal"])
-    nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
-
-    # Crevices read darker: less light reaches the bottom of a groove, and
-    # dust settles there on a part that has been handled.
-    shade = _new(nt, "ShaderNodeValToRGB")
-    shade.color_ramp.elements[0].position = 0.0
-    # Gentle. Crushing the valleys turns layer lines into hard scanlines;
-    # on a real part the groove is a shading cue, not a black stripe.
-    shade.color_ramp.elements[0].color = (*[c * 0.82 for c in colour], 1)
-    shade.color_ramp.elements[1].position = 0.55
-    shade.color_ramp.elements[1].color = (*colour, 1)
-    nt.links.new(height.outputs[0], shade.inputs["Fac"])
-    nt.links.new(shade.outputs["Color"], bsdf.inputs["Base Color"])
-
-    # Crests are burnished by the nozzle shoulder; valleys stay matte.
+    broad = _new(nt, "ShaderNodeTexNoise")
+    broad.inputs["Scale"].default_value = 140.0          # ~7mm features
+    broad.inputs["Detail"].default_value = 2.0
+    nt.links.new(co.outputs["Object"], broad.inputs["Vector"])
     rough = _new(nt, "ShaderNodeMapRange")
-    rough.inputs[3].default_value = 0.72
-    rough.inputs[4].default_value = 0.46
-    nt.links.new(height.outputs[0], rough.inputs[0])
+    rough.inputs[3].default_value = 0.59
+    rough.inputs[4].default_value = 0.65
+    nt.links.new(broad.outputs["Fac"], rough.inputs[0])
     nt.links.new(rough.outputs[0], bsdf.inputs["Roughness"])
 
     if displace:
+        nt.links.new(micro_bump.outputs["Normal"], bsdf.inputs["Normal"])
         disp = _new(nt, "ShaderNodeDisplacement")
         disp.inputs["Midlevel"].default_value = 0.5
-        disp.inputs["Scale"].default_value = 0.00005
+        # Measured PLA side surfaces run about Ra 13um / Rz 56um, so the
+        # visible envelope is 40-55um peak to valley -- a quarter of the
+        # nominal layer height, not the layer height itself.
+        disp.inputs["Scale"].default_value = 0.000045
         nt.links.new(height.outputs[0], disp.inputs["Height"])
         out = nt.nodes["Material Output"]
         nt.links.new(disp.outputs["Displacement"], out.inputs["Displacement"])
         mat.displacement_method = "BOTH"
+    else:
+        bump = _new(nt, "ShaderNodeBump")
+        bump.inputs["Strength"].default_value = 0.7
+        bump.inputs["Distance"].default_value = 0.000045
+        nt.links.new(height.outputs[0], bump.inputs["Height"])
+        nt.links.new(micro_bump.outputs["Normal"], bump.inputs["Normal"])
+        nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
     return mat
 
 
@@ -643,7 +695,9 @@ def import_bin(name="bin", z=REST, displace=False):
     obj.location.z = z          # never coplanar with what it rests on
 
     bev = obj.modifiers.new("bevel", "BEVEL")
-    bev.width = 0.00018
+    # 0.05-0.15mm catches a believable highlight on a CAD-sharp STL edge
+    # without making the part look injection moulded.
+    bev.width = 0.00010
     bev.segments = 2
     bev.limit_method = "ANGLE"
     bev.angle_limit = math.radians(35)
@@ -809,10 +863,14 @@ def shot_material():
     # From steeply above, skimming down the face. Layer lines run horizontally,
     # so a light from the side travels along the grooves and shadows nothing;
     # the relief only appears when the light crosses them.
-    area_light("rake", (-0.05, -0.135, 0.26), (0, -0.084, 0.020),
-               (0.16, 0.12), 2.6, (1.0, 0.95, 0.88))
-    area_light("fill", (0.40, -0.26, 0.10), (0, -0.084, 0.040),
-               (0.5, 0.4), 0.8, (0.86, 0.91, 1.0))
+    # Broad key, roughly 3x the object's apparent size, about 45 degrees off
+    # the camera axis and 30 above. A small hard grazing source resolves every
+    # groove as a black trench, which is the corduroy failure; a big soft one
+    # reveals the envelope through moving highlight gradients instead.
+    area_light("key", (-0.26, -0.30, 0.21), (0, -0.080, 0.032),
+               (0.26, 0.20), 3.2, (1.0, 0.96, 0.90))
+    area_light("fill", (0.36, -0.20, 0.09), (0, -0.080, 0.040),
+               (0.5, 0.4), 0.7, (0.88, 0.92, 1.0))
     # No depth of field: at 100mm and 0.22m this is macro range, where even
     # f/16 is millimetres deep and the surface never resolves.
     # Wide enough to read as an object -- rim, wall and a corner -- rather
