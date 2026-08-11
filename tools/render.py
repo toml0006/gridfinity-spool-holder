@@ -128,7 +128,10 @@ def reset_scene():
     world.use_nodes = True
     wt = world.node_tree
     bg = wt.nodes["Background"]
-    bg.inputs[1].default_value = 0.35
+    # Dim. The sky is here to give reflections something to resolve, not
+    # to light the scene -- at full strength it floods a dark grey part
+    # to mid grey and flattens the contrast the softboxes were carrying.
+    bg.inputs[1].default_value = 0.09
 
     # A graded sky rather than a flat colour. Plastic reads as plastic largely
     # through what it reflects, and a constant world gives every reflection a
@@ -141,7 +144,7 @@ def reset_scene():
     sky.altitude = 0.0
     sky.air_density = 1.6
     sky.dust_density = 2.2
-    sky.sun_intensity = 0.15
+    sky.sun_intensity = 0.06
     wt.links.new(sky.outputs["Color"], bg.inputs[0])
     return scene
 
