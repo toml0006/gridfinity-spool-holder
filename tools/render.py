@@ -1105,24 +1105,24 @@ def craft_room(scene, props=True):
 
     # Window light: big, warm, low, from the left.
     area_light("window", (-1.5, -0.55, 1.05), (0, 0.02, 0.05),
-               (1.5, 1.9), 150, (1.0, 0.94, 0.84))
+               (1.5, 1.9), 38, (1.0, 0.94, 0.84))
     # Cool bounce from the room.
     area_light("bounce", (1.5, -0.75, 0.55), (0, 0, 0.04),
-               (1.8, 1.4), 22, (0.82, 0.88, 1.0))
+               (1.8, 1.4), 5.5, (0.82, 0.88, 1.0))
     # Soft top to keep the interior of the bin readable.
     area_light("top", (-0.15, -0.15, 1.5), (0, 0, 0.05),
-               (1.2, 1.2), 40, (1.0, 0.97, 0.92))
+               (1.2, 1.2), 10, (1.0, 0.97, 0.92))
     # Small, harder accent raking down the front walls. The window is 1.5m of
     # very soft light, which is flattering but shades micro-relief almost not
     # at all; layer lines need one tighter source crossing them to register.
     area_light("accent", (-0.30, -0.55, 0.62), (0.02, -0.06, 0.020),
-               (0.14, 0.10), 12, (1.0, 0.96, 0.90))
+               (0.14, 0.10), 3, (1.0, 0.96, 0.90))
     # A long narrow strip, high and slightly behind. An anisotropic surface
     # needs an extended source to reflect: this is what draws the satin band
     # around each wound spool, and no shader work produces it under a broad
     # even light alone.
     area_light("strip", (0.10, 0.22, 0.68), (0.01, -0.02, 0.045),
-               (0.9, 0.05), 13, (1.0, 0.97, 0.93))
+               (0.9, 0.05), 3.2, (1.0, 0.97, 0.93))
 
 
 # --------------------------------------------------------------------------
@@ -1271,6 +1271,11 @@ def downsample(path, size, factor):
     import numpy as np
 
     img = bpy.data.images.load(path)
+    # Read the stored values, not de-gammaed ones. Averaging encoded pixels is
+    # very slightly wrong photometrically but exactly preserves the transfer
+    # curve; letting Blender de-gamma on read and re-encode on write lifted
+    # every pixel instead, measured 0.513 -> 0.743 on the same render.
+    img.colorspace_settings.name = "Non-Color"
     w, h = img.size
     buf = np.empty(w * h * 4, dtype=np.float32)
     img.pixels.foreach_get(buf)
@@ -1282,7 +1287,7 @@ def downsample(path, size, factor):
     # pixels are linear on both sides of this -- Blender de-gammas on read --
     # so the destination has to be told it is sRGB or saving writes linear
     # values into an sRGB file and the whole image comes out lifted.
-    out.colorspace_settings.name = img.colorspace_settings.name
+    out.colorspace_settings.name = "Non-Color"
     out.pixels.foreach_set(block.reshape(-1))
     out.filepath_raw = path
     out.file_format = "PNG"
