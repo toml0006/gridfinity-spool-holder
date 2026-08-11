@@ -112,6 +112,55 @@ def reset_scene():
     return scene
 
 
+def phone_look(scene):
+    """Post chain approximating an iPhone's computational pipeline.
+
+    A phone photo is not a clean render. What makes it recognisable is mostly
+    what happens after capture: aggressive local tone mapping that lifts
+    shadows and holds highlights, heavy sharpening, a little lens dispersion
+    at the edges, and a mild vignette. Skipping this is why "phone photo"
+    renders usually look like renders shot at 24mm.
+    """
+    scene.use_nodes = True
+    nt = scene.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+
+    rl = nt.nodes.new("CompositorNodeRLayers")
+    out = nt.nodes.new("CompositorNodeComposite")
+
+    # Chromatic aberration. Phone lenses are tiny and fast, and the pipeline
+    # only partly corrects it; a trace at the frame edge reads as "photo".
+    lens = nt.nodes.new("CompositorNodeLensdist")
+    lens.use_projector = False
+    # By index: this node's sockets have been renamed across versions.
+    lens.inputs[1].default_value = 0.0        # distortion
+    lens.inputs[2].default_value = 0.0022     # dispersion
+
+    # Shadow lift plus highlight hold: the HDR signature.
+    tone = nt.nodes.new("CompositorNodeColorBalance")
+    tone.correction_method = "LIFT_GAMMA_GAIN"
+    tone.lift = (1.012, 1.012, 1.018)
+    tone.gamma = (1.0, 1.0, 1.0)
+    tone.gain = (0.995, 0.995, 0.99)
+
+    sat = nt.nodes.new("CompositorNodeHueSat")
+    sat.inputs["Saturation"].default_value = 1.08
+
+    # Phone sharpening is unmistakable and heavier than anyone would apply by
+    # hand. Two-thirds strength here because the render is already clean.
+    sharp = nt.nodes.new("CompositorNodeFilter")
+    sharp.filter_type = "SHARPEN"
+    sharp.inputs["Fac"].default_value = 0.42
+
+    nt.links.new(rl.outputs["Image"], lens.inputs["Image"])
+    nt.links.new(lens.outputs["Image"], tone.inputs["Image"])
+    nt.links.new(tone.outputs["Image"], sat.inputs["Image"])
+    nt.links.new(sat.outputs["Image"], sharp.inputs["Image"])
+    nt.links.new(sharp.outputs["Image"], out.inputs["Image"])
+    return nt
+
+
 def area_light(name, loc, look_at, size, energy, colour=(1, 1, 1)):
     data = bpy.data.lights.new(name, type="AREA")
     data.shape = "RECTANGLE"
@@ -125,9 +174,22 @@ def area_light(name, loc, look_at, size, energy, colour=(1, 1, 1)):
     return obj
 
 
-def camera(scene, loc, target, lens=85, fstop=None, focus=None):
+#: iPhone 17 Pro Max main camera. The sensor is the important part: a phone
+#: gets its deep, everything-sharp look from a ~10mm sensor, not from a small
+#: aperture. Shooting f/1.78 on a 36mm full-frame sensor would give a blurred
+#: mush; on this sensor the physical aperture is 7.1/1.78 = 4mm and almost
+#: everything stays in focus, which is exactly what a phone photo looks like.
+PHONE_SENSOR_MM = 9.8       # ~1/1.28 inch, main camera
+PHONE_LENS_MM = 7.1         # about 24mm equivalent
+PHONE_FSTOP = 1.78
+
+
+def camera(scene, loc, target, lens=85, fstop=None, focus=None,
+           sensor=None):
     data = bpy.data.cameras.new("cam")
     data.lens = lens
+    if sensor:
+        data.sensor_width = sensor
     if fstop:
         data.dof.use_dof = True
         data.dof.aperture_fstop = fstop
@@ -497,65 +559,181 @@ def worn_plastic(name, colour, grime=0.55):
     return mat
 
 
+#: Coil angle from the circumferential direction. The thread guide reciprocates
+#: along the axis while the spool turns, so one traverse lays a right-handed
+#: helix and the return lays a left-handed one: a cross-wound package, not a
+#: stack of rings and not one continuous helix. Included crossing angle is
+#: twice this. Practical cross-winding runs 10-18 degrees.
+COIL_ANGLE = math.radians(12.0)
+THREAD_D = 0.20                        # apparent yarn diameter, mm (Tex 27-30)
+
+
+def _cross_wind_phase(nt, z_sock, u_sock, sign):
+    """Phase across one helix family, in yarn diameters.
+
+    In the unrolled (arc length, height) plane a family runs along
+    (cos a, sin a), so distance across it is v*cos a -/+ u*sin a. Wrapping that
+    at the yarn diameter gives one band per strand.
+    """
+    zc = _new(nt, "ShaderNodeMath")
+    zc.operation = "MULTIPLY"
+    zc.inputs[1].default_value = math.cos(COIL_ANGLE)
+    nt.links.new(z_sock, zc.inputs[0])
+
+    us = _new(nt, "ShaderNodeMath")
+    us.operation = "MULTIPLY"
+    us.inputs[1].default_value = sign * math.sin(COIL_ANGLE)
+    nt.links.new(u_sock, us.inputs[0])
+
+    tot = _new(nt, "ShaderNodeMath")
+    tot.operation = "ADD"
+    nt.links.new(zc.outputs[0], tot.inputs[0])
+    nt.links.new(us.outputs[0], tot.inputs[1])
+
+    per = _new(nt, "ShaderNodeMath")
+    per.operation = "DIVIDE"
+    per.inputs[1].default_value = THREAD_D * MM
+    nt.links.new(tot.outputs[0], per.inputs[0])
+
+    fr = _new(nt, "ShaderNodeMath")
+    fr.operation = "FRACT"
+    nt.links.new(per.outputs[0], fr.inputs[0])
+
+    c = _new(nt, "ShaderNodeMath")
+    c.operation = "MULTIPLY_ADD"
+    c.inputs[1].default_value = 2.0
+    c.inputs[2].default_value = -1.0
+    nt.links.new(fr.outputs[0], c.inputs[0])
+
+    sq = _new(nt, "ShaderNodeMath")
+    sq.operation = "POWER"
+    sq.inputs[1].default_value = 2.0
+    nt.links.new(c.outputs[0], sq.inputs[0])
+
+    inv = _new(nt, "ShaderNodeMath")
+    inv.operation = "SUBTRACT"
+    inv.inputs[0].default_value = 1.0
+    nt.links.new(sq.outputs[0], inv.inputs[1])
+
+    mx = _new(nt, "ShaderNodeMath")
+    mx.operation = "MAXIMUM"
+    mx.inputs[1].default_value = 0.0
+    nt.links.new(inv.outputs[0], mx.inputs[0])
+
+    rt = _new(nt, "ShaderNodeMath")
+    rt.operation = "SQRT"
+    nt.links.new(mx.outputs[0], rt.inputs[0])
+    return rt.outputs[0]
+
+
 def thread_material(name, colour):
-    """Wound thread: fine helical banding, sheen, loose fibre fuzz."""
+    """Cross-wound polyester thread.
+
+    Two opposed helix families, each with its own real tangent driving an
+    anisotropic lobe, mixed evenly. That is what produces the satin band that
+    runs around a spool: sheen alone reads as fabric, and a single helix reads
+    as a screw thread. The previous version used bands around Z, which is
+    neither, and looked like a dyed plastic cylinder.
+    """
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nt = mat.node_tree
-    b = nt.nodes["Principled BSDF"]
-    if "Sheen Weight" in b.inputs:
-        # Sheen is white retroreflection: crank it and every dyed thread
-        # washes out to pastel, which is what a heavy value did here.
-        b.inputs["Sheen Weight"].default_value = 0.3
-        b.inputs["Sheen Roughness"].default_value = 0.35
+    out = nt.nodes["Material Output"]
+    nt.nodes.remove(nt.nodes["Principled BSDF"])
 
     co = _new(nt, "ShaderNodeTexCoord")
+    sep = _new(nt, "ShaderNodeSeparateXYZ")
+    nt.links.new(co.outputs["Object"], sep.inputs["Vector"])
 
-    ao = _new(nt, "ShaderNodeAmbientOcclusion")
-    ao.inputs["Distance"].default_value = 0.005
-    ao.only_local = True
-    ramp = _new(nt, "ShaderNodeValToRGB")
-    # Only a mild dirt falloff. Crushing the shadowed side of a wound spool
-    # desaturates the one thing carrying colour in the whole frame.
-    ramp.color_ramp.elements[0].position = 0.15
-    ramp.color_ramp.elements[0].color = (*[c * 0.68 for c in colour], 1)
-    ramp.color_ramp.elements[1].position = 0.75
-    ramp.color_ramp.elements[1].color = (*colour, 1)
-    nt.links.new(ao.outputs["AO"], ramp.inputs["Fac"])
-    nt.links.new(ramp.outputs["Color"], b.inputs["Base Color"])
+    # Cylindrical frame about the spool axis.
+    x2 = _new(nt, "ShaderNodeMath")
+    x2.operation = "POWER"
+    x2.inputs[1].default_value = 2.0
+    nt.links.new(sep.outputs["X"], x2.inputs[0])
+    y2 = _new(nt, "ShaderNodeMath")
+    y2.operation = "POWER"
+    y2.inputs[1].default_value = 2.0
+    nt.links.new(sep.outputs["Y"], y2.inputs[0])
+    r2 = _new(nt, "ShaderNodeMath")
+    r2.operation = "ADD"
+    nt.links.new(x2.outputs[0], r2.inputs[0])
+    nt.links.new(y2.outputs[0], r2.inputs[1])
+    r = _new(nt, "ShaderNodeMath")
+    r.operation = "SQRT"
+    nt.links.new(r2.outputs[0], r.inputs[0])
 
-    wind = _new(nt, "ShaderNodeTexWave")
-    wind.wave_type = "BANDS"
-    wind.bands_direction = "Z"
-    wind.inputs["Scale"].default_value = 2200.0
-    wind.inputs["Distortion"].default_value = 3.0
-    nt.links.new(co.outputs["Object"], wind.inputs["Vector"])
+    theta = _new(nt, "ShaderNodeMath")
+    theta.operation = "ARCTAN2"
+    nt.links.new(sep.outputs["Y"], theta.inputs[0])
+    nt.links.new(sep.outputs["X"], theta.inputs[1])
 
-    fuzz = _new(nt, "ShaderNodeTexNoise")
-    fuzz.inputs["Scale"].default_value = 2600.0
-    fuzz.inputs["Detail"].default_value = 9.0
-    nt.links.new(co.outputs["Object"], fuzz.inputs["Vector"])
+    # Arc length around the package: the unrolled horizontal coordinate.
+    u = _new(nt, "ShaderNodeMath")
+    u.operation = "MULTIPLY"
+    nt.links.new(r.outputs[0], u.inputs[0])
+    nt.links.new(theta.outputs[0], u.inputs[1])
 
-    a = _new(nt, "ShaderNodeMath")
-    a.operation = "MULTIPLY"
-    a.inputs[1].default_value = 0.6
-    nt.links.new(wind.outputs["Fac"], a.inputs[0])
-    c = _new(nt, "ShaderNodeMath")
-    c.operation = "MULTIPLY"
-    c.inputs[1].default_value = 0.4
-    nt.links.new(fuzz.outputs["Fac"], c.inputs[0])
-    h = _new(nt, "ShaderNodeMath")
-    h.operation = "ADD"
-    nt.links.new(a.outputs[0], h.inputs[0])
-    nt.links.new(c.outputs[0], h.inputs[1])
+    h_plus = _cross_wind_phase(nt, sep.outputs["Z"], u.outputs[0], +1.0)
+    h_minus = _cross_wind_phase(nt, sep.outputs["Z"], u.outputs[0], -1.0)
+
+    # Whichever family is on top locally wins, which is what gives real
+    # over/under crossings rather than a plaid of equal weight.
+    height = _new(nt, "ShaderNodeMath")
+    height.operation = "MAXIMUM"
+    nt.links.new(h_plus, height.inputs[0])
+    nt.links.new(h_minus, height.inputs[1])
 
     bump = _new(nt, "ShaderNodeBump")
-    bump.inputs["Strength"].default_value = 0.45
-    bump.inputs["Distance"].default_value = 0.00003
-    nt.links.new(h.outputs[0], bump.inputs["Height"])
-    nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+    bump.inputs["Strength"].default_value = 0.9
+    bump.inputs["Distance"].default_value = 0.00007
+    nt.links.new(height.outputs[0], bump.inputs["Height"])
 
-    b.inputs["Roughness"].default_value = 0.62
+    # Tangents. A family runs along cos(a) * circumferential + sin(a) * axis,
+    # and the circumferential direction at (x, y) is (-y, x, 0) / r.
+    def tangent(sign):
+        nx = _new(nt, "ShaderNodeMath")
+        nx.operation = "DIVIDE"
+        nt.links.new(sep.outputs["Y"], nx.inputs[0])
+        nt.links.new(r.outputs[0], nx.inputs[1])
+        negx = _new(nt, "ShaderNodeMath")
+        negx.operation = "MULTIPLY"
+        negx.inputs[1].default_value = -math.cos(COIL_ANGLE)
+        nt.links.new(nx.outputs[0], negx.inputs[0])
+
+        ny = _new(nt, "ShaderNodeMath")
+        ny.operation = "DIVIDE"
+        nt.links.new(sep.outputs["X"], ny.inputs[0])
+        nt.links.new(r.outputs[0], ny.inputs[1])
+        posy = _new(nt, "ShaderNodeMath")
+        posy.operation = "MULTIPLY"
+        posy.inputs[1].default_value = math.cos(COIL_ANGLE)
+        nt.links.new(ny.outputs[0], posy.inputs[0])
+
+        comb = _new(nt, "ShaderNodeCombineXYZ")
+        nt.links.new(negx.outputs[0], comb.inputs["X"])
+        nt.links.new(posy.outputs[0], comb.inputs["Y"])
+        comb.inputs["Z"].default_value = sign * math.sin(COIL_ANGLE)
+        return comb.outputs["Vector"]
+
+    def lobe(sign):
+        b = _new(nt, "ShaderNodeBsdfPrincipled")
+        b.inputs["Base Color"].default_value = (*colour, 1)
+        b.inputs["Roughness"].default_value = 0.42
+        b.inputs["IOR"].default_value = 1.575          # PET polyester
+        if "Anisotropic" in b.inputs:
+            b.inputs["Anisotropic"].default_value = 0.75
+            nt.links.new(tangent(sign), b.inputs["Tangent"])
+        if "Sheen Weight" in b.inputs:
+            b.inputs["Sheen Weight"].default_value = 0.06
+            b.inputs["Sheen Roughness"].default_value = 0.3
+        nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+        return b
+
+    mix = _new(nt, "ShaderNodeMixShader")
+    mix.inputs["Fac"].default_value = 0.5
+    nt.links.new(lobe(+1.0).outputs["BSDF"], mix.inputs[1])
+    nt.links.new(lobe(-1.0).outputs["BSDF"], mix.inputs[2])
+    nt.links.new(mix.outputs["Shader"], out.inputs["Surface"])
     return mat
 
 
@@ -653,8 +831,11 @@ def make_spool(index, location, rotation=None):
         "spool_plastic_%d" % index, (0.80, 0.79, 0.74)))
 
     tr = SP_THREAD_D / 2
+    # The profile has to return to its start or spin() revolves an open tube
+    # and the spool renders hollow when seen end on.
     thread = spun("spool_thread_%d" % index, [
-        (cr, ft + 0.2), (tr, ft + 0.7), (tr, SP_H - ft - 0.7), (cr, SP_H - ft - 0.2),
+        (cr, ft + 0.2), (tr, ft + 0.7), (tr, SP_H - ft - 0.7),
+        (cr, SP_H - ft - 0.2), (cr, ft + 0.2),
     ])
     colour = THREAD_COLOURS[(index * 7) % len(THREAD_COLOURS)]
     thread.data.materials.append(thread_material("thread_%d" % index, colour))
@@ -749,14 +930,14 @@ def craft_room(scene, props=True):
     metres behind the subject and never resolves, so it only has to carry
     colour and silhouette.
     """
-    table = box("table", (3.0, 2.4, 0.04), (0, 0.35, -0.02))
+    table = box("table", (6.0, 4.0, 0.04), (0, 0.35, -0.02))
     table.data.materials.append(wood_material("oak"))
 
     mat = box("cutting_mat", (0.62, 0.46, MAT_TOP), (0, 0, MAT_TOP / 2),
               bevel=0.0015)
     mat.data.materials.append(cutting_mat_material("mat"))
 
-    wall = box("wall", (4.0, 0.06, 2.6), (0, 1.15, 1.0))
+    wall = box("wall", (8.0, 0.06, 3.4), (0, 1.15, 1.2))
     wall.data.materials.append(flat_material("wall", (0.30, 0.27, 0.24), 0.85))
 
     if props:
@@ -794,6 +975,12 @@ def craft_room(scene, props=True):
     # at all; layer lines need one tighter source crossing them to register.
     area_light("accent", (-0.30, -0.55, 0.62), (0.02, -0.06, 0.020),
                (0.14, 0.10), 12, (1.0, 0.96, 0.90))
+    # A long narrow strip, high and slightly behind. An anisotropic surface
+    # needs an extended source to reflect: this is what draws the satin band
+    # around each wound spool, and no shader work produces it under a broad
+    # even light alone.
+    area_light("strip", (0.10, 0.22, 0.68), (0.01, -0.02, 0.045),
+               (0.9, 0.05), 13, (1.0, 0.97, 0.93))
 
 
 # --------------------------------------------------------------------------
@@ -812,7 +999,13 @@ def shot_hero(loaded):
                    rotation=(math.radians(90), 0, math.radians(18)))
         make_spool(44, (0.132, 0.030, REST))
         make_spool(47, (0.088, -0.055, REST))
-    camera(scene, (0.34, -0.40, 0.21), (0.010, -0.012, 0.026), lens=85, fstop=12)
+    # Shot on the phone's main camera. 24mm equivalent is wide, so the camera
+    # has to come in to about 0.28m to frame the same subject -- which is
+    # itself part of the look: phone shots of objects are taken close, with
+    # the mild wide-angle perspective that implies.
+    phone_look(scene)
+    camera(scene, (0.132, -0.155, 0.094), (0.010, -0.012, 0.026),
+           lens=PHONE_LENS_MM, fstop=PHONE_FSTOP, sensor=PHONE_SENSOR_MM)
     return "hero_loaded" if loaded else "hero_empty"
 
 
@@ -890,7 +1083,28 @@ def shot_material():
     return "material_detail"
 
 
+def shot_spools():
+    """Close on three loose spools: the shot for judging wound thread.
+
+    Framed so a spool is ~700px across, which by the projected-thread-diameter
+    rule (0.2mm on a 23.4mm package) puts a single strand at about 6px --
+    comfortably into the range where real winding structure has to read.
+    """
+    scene = reset_scene()
+    craft_room(scene, props=False)
+    make_spool(41, (0.010, -0.004, REST + SP_FLANGE_D / 2 * MM),
+               rotation=(math.radians(90), 0, math.radians(14)))
+    make_spool(44, (0.036, 0.020, REST))
+    make_spool(47, (-0.020, 0.016, REST))
+    area_light("strip2", (-0.14, -0.16, 0.20), (0.005, 0, 0.012),
+               (0.40, 0.03), 3, (1.0, 0.97, 0.93))
+    camera(scene, (0.048, -0.235, 0.082), (0.006, 0.002, 0.014),
+           lens=100)
+    return "spool_detail"
+
+
 SHOTS = {
+    "spool_detail": shot_spools,
     "material_detail": shot_material,
     "hero_empty": lambda: shot_hero(False),
     "hero_loaded": lambda: shot_hero(True),
