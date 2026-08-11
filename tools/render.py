@@ -1279,6 +1279,10 @@ def downsample(path, size, factor):
 
     out = bpy.data.images.new("ds", size[0], size[1], alpha=True,
                               float_buffer=True)
+    # pixels are linear on both sides of this -- Blender de-gammas on read --
+    # so the destination has to be told it is sRGB or saving writes linear
+    # values into an sRGB file and the whole image comes out lifted.
+    out.colorspace_settings.name = img.colorspace_settings.name
     out.pixels.foreach_set(block.reshape(-1))
     out.filepath_raw = path
     out.file_format = "PNG"
