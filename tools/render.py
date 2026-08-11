@@ -108,7 +108,7 @@ def reset_scene():
     world.use_nodes = True
     bg = world.node_tree.nodes["Background"]
     bg.inputs[0].default_value = (0.16, 0.15, 0.14, 1)
-    bg.inputs[1].default_value = 0.35
+    bg.inputs[1].default_value = 0.7
     return scene
 
 
@@ -181,7 +181,9 @@ def area_light(name, loc, look_at, size, energy, colour=(1, 1, 1)):
 #: everything stays in focus, which is exactly what a phone photo looks like.
 PHONE_SENSOR_MM = 9.8       # ~1/1.28 inch, main camera
 PHONE_LENS_MM = 7.1         # about 24mm equivalent
-PHONE_FSTOP = 1.78
+PHONE_FSTOP = 8.0          # not the phone's real f/1.78: at 190mm
+                           # that is macro-thin, and the subject has
+                           # to be sharp front to back
 
 
 def camera(scene, loc, target, lens=85, fstop=None, focus=None,
@@ -506,7 +508,7 @@ def filament_material(name, colour, displace=False):
         # a listing has to actually show that the part is printed.
         bump = _new(nt, "ShaderNodeBump")
         bump.inputs["Strength"].default_value = 1.0
-        bump.inputs["Distance"].default_value = 0.00019
+        bump.inputs["Distance"].default_value = 0.00032
         nt.links.new(height.outputs[0], bump.inputs["Height"])
         nt.links.new(micro_bump.outputs["Normal"], bump.inputs["Normal"])
         nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
@@ -565,7 +567,9 @@ def worn_plastic(name, colour, grime=0.55):
 #: stack of rings and not one continuous helix. Included crossing angle is
 #: twice this. Practical cross-winding runs 10-18 degrees.
 COIL_ANGLE = math.radians(12.0)
-THREAD_D = 0.20                        # apparent yarn diameter, mm (Tex 27-30)
+THREAD_D = 0.30                        # apparent yarn diameter, mm.
+#: Above the 0.18-0.25 real range for Tex 27-30 -- at listing framing a
+#: true strand is ~1px and vanishes into the denoiser and the sharpener.
 
 
 def _cross_wind_phase(nt, z_sock, u_sock, sign):
@@ -684,8 +688,8 @@ def thread_material(name, colour):
     nt.links.new(h_minus, height.inputs[1])
 
     bump = _new(nt, "ShaderNodeBump")
-    bump.inputs["Strength"].default_value = 0.9
-    bump.inputs["Distance"].default_value = 0.00007
+    bump.inputs["Strength"].default_value = 1.0
+    bump.inputs["Distance"].default_value = 0.00022
     nt.links.new(height.outputs[0], bump.inputs["Height"])
 
     # Tangents. A family runs along cos(a) * circumferential + sin(a) * axis,
