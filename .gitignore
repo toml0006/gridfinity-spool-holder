@@ -1,5 +1,7 @@
 *.stl
 !out/*.stl
+*.gcode
+!out/*.gcode
 *.3mf
 .DS_Store
 __pycache__/

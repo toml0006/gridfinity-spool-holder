@@ -30,12 +30,22 @@ import bpy
 import bmesh
 from mathutils import Vector
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gcode
+
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STL = os.path.join(HERE, "out", "spool_holder_3x4x7.stl")
+GCODE = os.path.join(HERE, "out", "spool_holder_3x4x7.gcode")
+#: Bead section, deliberately larger than the nominal layer. A bead is
+#: squashed onto the one below and fuses with it; sized exactly to the
+#: layer pitch the tubes merely touch, leaving hard grooves that alias
+#: into moire. 15 percent over gives real overlap.
+BEAD_H = 0.30          # sliced at 0.28
+BEAD_WIDTH = 0.48      # extrusion width 0.45
 OUT = os.path.join(HERE, "renders")
 
 MM = 0.001
@@ -103,6 +113,8 @@ def reset_scene():
     except Exception:
         scene.cycles.device = "CPU"
 
+    phone_look(scene)
+
     world = bpy.data.worlds.new("W")
     scene.world = world
     world.use_nodes = True
@@ -151,7 +163,7 @@ def phone_look(scene):
     # hand. Two-thirds strength here because the render is already clean.
     sharp = nt.nodes.new("CompositorNodeFilter")
     sharp.filter_type = "SHARPEN"
-    sharp.inputs["Fac"].default_value = 0.42
+    sharp.inputs["Fac"].default_value = 0.18
 
     nt.links.new(rl.outputs["Image"], lens.inputs["Image"])
     nt.links.new(lens.outputs["Image"], tone.inputs["Image"])
@@ -190,6 +202,10 @@ def camera(scene, loc, target, lens=85, fstop=None, focus=None,
            sensor=None):
     data = bpy.data.cameras.new("cam")
     data.lens = lens
+    # The default 0.1m near plane clips the foreground away once the camera
+    # is working at phone distances, which shows up as flat black bands.
+    data.clip_start = 0.001
+    data.clip_end = 100.0
     if sensor:
         data.sensor_width = sensor
     if fstop:
@@ -847,7 +863,75 @@ def peg_positions():
     return [(x - ox, y - oy) for x, y in pts]
 
 
+def printed_plastic(name, colour):
+    """Plastic, and nothing else.
+
+    With real toolpath geometry there is no layer texture to fake: the beads
+    are shape, so the light does the work. All that is left is the polymer --
+    a rough dielectric over pigment, with a broad roughness drift so the
+    surface is not uniform, and a micron-scale grain.
+    """
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    b = nt.nodes["Principled BSDF"]
+    b.inputs["Base Color"].default_value = (*colour, 1)
+    b.inputs["IOR"].default_value = 1.46
+    b.inputs["Metallic"].default_value = 0.0
+    for opt in ("Subsurface Weight", "Sheen Weight", "Anisotropic", "Coat Weight"):
+        if opt in b.inputs:
+            b.inputs[opt].default_value = 0.0
+
+    co = _new(nt, "ShaderNodeTexCoord")
+    broad = _new(nt, "ShaderNodeTexNoise")
+    broad.inputs["Scale"].default_value = 140.0
+    broad.inputs["Detail"].default_value = 2.0
+    nt.links.new(co.outputs["Object"], broad.inputs["Vector"])
+    rough = _new(nt, "ShaderNodeMapRange")
+    rough.inputs[3].default_value = 0.57
+    rough.inputs[4].default_value = 0.66
+    nt.links.new(broad.outputs["Fac"], rough.inputs[0])
+    nt.links.new(rough.outputs[0], b.inputs["Roughness"])
+
+    micro = _new(nt, "ShaderNodeTexNoise")
+    micro.inputs["Scale"].default_value = 22000.0
+    micro.inputs["Detail"].default_value = 5.0
+    nt.links.new(co.outputs["Object"], micro.inputs["Vector"])
+    bump = _new(nt, "ShaderNodeBump")
+    bump.inputs["Strength"].default_value = 0.3
+    bump.inputs["Distance"].default_value = 0.0000025
+    nt.links.new(micro.outputs["Fac"], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
+    return mat
+
+
+_GCODE_CACHE = {}
+
+
+def import_bin_paths(name="bin", z=REST):
+    """The bin as its own toolpaths.
+
+    Every visible bead is real geometry, so layer stepping, the seam, the
+    contour rings on the top surfaces and the scalloped silhouette are shape
+    rather than a texture pretending to be shape.
+    """
+    if GCODE not in _GCODE_CACHE:
+        _GCODE_CACHE[GCODE] = gcode.parse(GCODE)
+    runs = _GCODE_CACHE[GCODE]
+    lo, hi = gcode.bounds(runs)
+    obj = gcode.build_curves(
+        runs, name=name, width=BEAD_WIDTH, height=BEAD_H,
+        # Centre in XY, and drop by half a bead so the underside of the first
+        # layer lands on z=0 rather than its centreline.
+        origin=((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2] - BEAD_H / 2))
+    obj.location.z = z
+    obj.data.materials.append(printed_plastic("pla_" + name, FILAMENT))
+    return obj
+
+
 def import_bin(name="bin", z=REST, displace=False):
+    if os.path.exists(GCODE):
+        return import_bin_paths(name, z)
     before = set(bpy.data.objects)
     bpy.ops.wm.stl_import(filepath=STL, global_scale=MM)
     obj = (set(bpy.data.objects) - before).pop()
@@ -988,7 +1072,6 @@ def shot_hero(loaded):
     # has to come in to about 0.28m to frame the same subject -- which is
     # itself part of the look: phone shots of objects are taken close, with
     # the mild wide-angle perspective that implies.
-    phone_look(scene)
     camera(scene, (0.132, -0.155, 0.094), (0.010, -0.012, 0.026),
            lens=PHONE_LENS_MM, fstop=PHONE_FSTOP, sensor=PHONE_SENSOR_MM)
     return "hero_loaded" if loaded else "hero_empty"
@@ -1001,7 +1084,8 @@ def shot_stacked():
     import_bin("bin_upper", z=REST + STACK_PITCH * MM)
     # Load the upper bin: the lower one's contents are hidden by the bin on it.
     load_spools(REST + STACK_PITCH * MM + (BASE_H + FLOOR_T) * MM)
-    camera(scene, (0.42, -0.48, 0.30), (0, 0, 0.052), lens=80, fstop=13)
+    camera(scene, (0.150, -0.172, 0.128), (0, 0, 0.050),
+           lens=PHONE_LENS_MM, fstop=PHONE_FSTOP, sensor=PHONE_SENSOR_MM)
     return "stacked"
 
 
@@ -1014,7 +1098,8 @@ def shot_topdown(loaded):
     area_light("overhead", (-0.30, -0.30, 1.0), (0, 0, 0.03), (2.0, 2.0), 90)
     # A few degrees off vertical: straight down, a spool is only its top
     # flange and the wound colour never shows.
-    camera(scene, (0.035, -0.145, 0.60), (0, 0, 0.012), lens=70)
+    camera(scene, (0.020, -0.052, 0.196), (0, 0, 0.012),
+           lens=PHONE_LENS_MM, fstop=PHONE_FSTOP, sensor=PHONE_SENSOR_MM)
     return "topdown_loaded" if loaded else "topdown_empty"
 
 
@@ -1029,7 +1114,8 @@ def shot_macro():
     drop_to_floor(b, MAT_TOP)
     area_light("rake", (-0.55, -0.65, 0.36), (0, -0.02, 0.08),
                (0.9, 0.7), 16, (1.0, 0.95, 0.88))
-    camera(scene, (0.17, -0.74, 0.17), (0, 0, 0.085), lens=80, fstop=11)
+    camera(scene, (0.052, -0.196, 0.104), (0, 0, 0.085),
+           lens=PHONE_LENS_MM, fstop=PHONE_FSTOP, sensor=PHONE_SENSOR_MM)
     return "macro_base_lip"
 
 
@@ -1064,7 +1150,8 @@ def shot_material():
     # Wide enough to read as an object -- rim, wall and a corner -- rather
     # than a texture swatch, but still about 75mm across so a 0.2mm layer
     # spans several pixels.
-    camera(scene, (0.055, -0.245, 0.079), (0.0, -0.080, 0.034), lens=85)
+    camera(scene, (0.036, -0.212, 0.060), (0.0, -0.080, 0.030),
+           lens=PHONE_LENS_MM, sensor=PHONE_SENSOR_MM)
     return "material_detail"
 
 
@@ -1083,8 +1170,8 @@ def shot_spools():
     make_spool(47, (-0.020, 0.016, REST))
     area_light("strip2", (-0.14, -0.16, 0.20), (0.005, 0, 0.012),
                (0.40, 0.03), 3, (1.0, 0.97, 0.93))
-    camera(scene, (0.048, -0.235, 0.082), (0.006, 0.002, 0.014),
-           lens=100)
+    camera(scene, (0.020, -0.082, 0.038), (0.006, 0.002, 0.014),
+           lens=PHONE_LENS_MM, fstop=PHONE_FSTOP, sensor=PHONE_SENSOR_MM)
     return "spool_detail"
 
 
