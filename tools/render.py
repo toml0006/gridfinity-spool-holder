@@ -181,7 +181,7 @@ def area_light(name, loc, look_at, size, energy, colour=(1, 1, 1)):
 #: everything stays in focus, which is exactly what a phone photo looks like.
 PHONE_SENSOR_MM = 9.8       # ~1/1.28 inch, main camera
 PHONE_LENS_MM = 7.1         # about 24mm equivalent
-PHONE_FSTOP = 8.0          # not the phone's real f/1.78: at 190mm
+PHONE_FSTOP = 4.0          # not the phone's real f/1.78: at 190mm
                            # that is macro-thin, and the subject has
                            # to be sharp front to back
 
@@ -561,43 +561,27 @@ def worn_plastic(name, colour, grime=0.55):
     return mat
 
 
-#: Coil angle from the circumferential direction. The thread guide reciprocates
-#: along the axis while the spool turns, so one traverse lays a right-handed
-#: helix and the return lays a left-handed one: a cross-wound package, not a
-#: stack of rings and not one continuous helix. Included crossing angle is
-#: twice this. Practical cross-winding runs 10-18 degrees.
-COIL_ANGLE = math.radians(12.0)
-THREAD_D = 0.30                        # apparent yarn diameter, mm.
-#: Above the 0.18-0.25 real range for Tex 27-30 -- at listing framing a
-#: true strand is ~1px and vanishes into the denoiser and the sharpener.
+#: Sewing thread is a plied cord: fine filaments twisted into plies, plies
+#: twisted into the thread. Wound onto a spool it lies in near-horizontal
+#: wraps. So the surface has two scales, and they are not the same thing:
+#:
+#:   the WRAP  -- horizontal bands, one per strand laid beside the last
+#:   the TWIST -- diagonal grooves spiralling along each strand
+#:
+#: Modelling only the wrap gives corduroy; modelling only a crossing pattern
+#: gives woven fabric. The twist running along a horizontal wrap is what makes
+#: it read as thread.
+THREAD_D = 0.30            # strand diameter, so also the wrap pitch, mm
+TWIST_PITCH = 0.24         # distance along the cord per ply turn, mm
+TWIST_ANGLE = math.radians(34.0)   # ply groove angle from the cord axis
 
 
-def _cross_wind_phase(nt, z_sock, u_sock, sign):
-    """Phase across one helix family, in yarn diameters.
-
-    In the unrolled (arc length, height) plane a family runs along
-    (cos a, sin a), so distance across it is v*cos a -/+ u*sin a. Wrapping that
-    at the yarn diameter gives one band per strand.
-    """
-    zc = _new(nt, "ShaderNodeMath")
-    zc.operation = "MULTIPLY"
-    zc.inputs[1].default_value = math.cos(COIL_ANGLE)
-    nt.links.new(z_sock, zc.inputs[0])
-
-    us = _new(nt, "ShaderNodeMath")
-    us.operation = "MULTIPLY"
-    us.inputs[1].default_value = sign * math.sin(COIL_ANGLE)
-    nt.links.new(u_sock, us.inputs[0])
-
-    tot = _new(nt, "ShaderNodeMath")
-    tot.operation = "ADD"
-    nt.links.new(zc.outputs[0], tot.inputs[0])
-    nt.links.new(us.outputs[0], tot.inputs[1])
-
+def _lobe(nt, value_sock, pitch_mm):
+    """Round profile repeated at a pitch: sqrt(1 - (2*frac - 1)^2)."""
     per = _new(nt, "ShaderNodeMath")
     per.operation = "DIVIDE"
-    per.inputs[1].default_value = THREAD_D * MM
-    nt.links.new(tot.outputs[0], per.inputs[0])
+    per.inputs[1].default_value = pitch_mm * MM
+    nt.links.new(value_sock, per.inputs[0])
 
     fr = _new(nt, "ShaderNodeMath")
     fr.operation = "FRACT"
@@ -631,19 +615,17 @@ def _cross_wind_phase(nt, z_sock, u_sock, sign):
 
 
 def thread_material(name, colour):
-    """Cross-wound polyester thread.
-
-    Two opposed helix families, each with its own real tangent driving an
-    anisotropic lobe, mixed evenly. That is what produces the satin band that
-    runs around a spool: sheen alone reads as fabric, and a single helix reads
-    as a screw thread. The previous version used bands around Z, which is
-    neither, and looked like a dyed plastic cylinder.
-    """
+    """Twisted polyester thread wound in horizontal wraps."""
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nt = mat.node_tree
-    out = nt.nodes["Material Output"]
-    nt.nodes.remove(nt.nodes["Principled BSDF"])
+    b = nt.nodes["Principled BSDF"]
+    b.inputs["Base Color"].default_value = (*colour, 1)
+    b.inputs["Roughness"].default_value = 0.42
+    b.inputs["IOR"].default_value = 1.575           # PET polyester
+    if "Sheen Weight" in b.inputs:
+        b.inputs["Sheen Weight"].default_value = 0.08
+        b.inputs["Sheen Roughness"].default_value = 0.3
 
     co = _new(nt, "ShaderNodeTexCoord")
     sep = _new(nt, "ShaderNodeSeparateXYZ")
@@ -671,73 +653,72 @@ def thread_material(name, colour):
     nt.links.new(sep.outputs["Y"], theta.inputs[0])
     nt.links.new(sep.outputs["X"], theta.inputs[1])
 
-    # Arc length around the package: the unrolled horizontal coordinate.
+    # Arc length around the package: distance along the cord.
     u = _new(nt, "ShaderNodeMath")
     u.operation = "MULTIPLY"
     nt.links.new(r.outputs[0], u.inputs[0])
     nt.links.new(theta.outputs[0], u.inputs[1])
 
-    h_plus = _cross_wind_phase(nt, sep.outputs["Z"], u.outputs[0], +1.0)
-    h_minus = _cross_wind_phase(nt, sep.outputs["Z"], u.outputs[0], -1.0)
+    # 1. The wrap. Horizontal bands, one strand per pitch, straight off Z.
+    wrap = _lobe(nt, sep.outputs["Z"], THREAD_D)
 
-    # Whichever family is on top locally wins, which is what gives real
-    # over/under crossings rather than a plaid of equal weight.
+    # 2. The twist. Grooves spiralling along the cord, so their phase runs
+    #    mostly along the cord (u) with a small climb in Z.
+    ucos = _new(nt, "ShaderNodeMath")
+    ucos.operation = "MULTIPLY"
+    ucos.inputs[1].default_value = math.cos(TWIST_ANGLE)
+    nt.links.new(u.outputs[0], ucos.inputs[0])
+    zsin = _new(nt, "ShaderNodeMath")
+    zsin.operation = "MULTIPLY"
+    zsin.inputs[1].default_value = math.sin(TWIST_ANGLE)
+    nt.links.new(sep.outputs["Z"], zsin.inputs[0])
+    along = _new(nt, "ShaderNodeMath")
+    along.operation = "ADD"
+    nt.links.new(ucos.outputs[0], along.inputs[0])
+    nt.links.new(zsin.outputs[0], along.inputs[1])
+    twist = _lobe(nt, along.outputs[0], TWIST_PITCH)
+
+    # The twist cuts into the strand rather than sitting beside it, so it
+    # modulates the wrap instead of adding to it. Keeps the strand reading as
+    # one rounded cord with a spiral groove, not as two crossing ribs.
+    tw_scaled = _new(nt, "ShaderNodeMath")
+    tw_scaled.operation = "MULTIPLY_ADD"
+    tw_scaled.inputs[1].default_value = 0.38
+    tw_scaled.inputs[2].default_value = 0.62
+    nt.links.new(twist, tw_scaled.inputs[0])
+
     height = _new(nt, "ShaderNodeMath")
-    height.operation = "MAXIMUM"
-    nt.links.new(h_plus, height.inputs[0])
-    nt.links.new(h_minus, height.inputs[1])
+    height.operation = "MULTIPLY"
+    nt.links.new(wrap, height.inputs[0])
+    nt.links.new(tw_scaled.outputs[0], height.inputs[1])
 
     bump = _new(nt, "ShaderNodeBump")
     bump.inputs["Strength"].default_value = 1.0
-    bump.inputs["Distance"].default_value = 0.00022
+    bump.inputs["Distance"].default_value = 0.00024
     nt.links.new(height.outputs[0], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
 
-    # Tangents. A family runs along cos(a) * circumferential + sin(a) * axis,
-    # and the circumferential direction at (x, y) is (-y, x, 0) / r.
-    def tangent(sign):
-        nx = _new(nt, "ShaderNodeMath")
-        nx.operation = "DIVIDE"
-        nt.links.new(sep.outputs["Y"], nx.inputs[0])
-        nt.links.new(r.outputs[0], nx.inputs[1])
-        negx = _new(nt, "ShaderNodeMath")
-        negx.operation = "MULTIPLY"
-        negx.inputs[1].default_value = -math.cos(COIL_ANGLE)
-        nt.links.new(nx.outputs[0], negx.inputs[0])
-
-        ny = _new(nt, "ShaderNodeMath")
-        ny.operation = "DIVIDE"
-        nt.links.new(sep.outputs["X"], ny.inputs[0])
-        nt.links.new(r.outputs[0], ny.inputs[1])
-        posy = _new(nt, "ShaderNodeMath")
-        posy.operation = "MULTIPLY"
-        posy.inputs[1].default_value = math.cos(COIL_ANGLE)
-        nt.links.new(ny.outputs[0], posy.inputs[0])
-
-        comb = _new(nt, "ShaderNodeCombineXYZ")
-        nt.links.new(negx.outputs[0], comb.inputs["X"])
-        nt.links.new(posy.outputs[0], comb.inputs["Y"])
-        comb.inputs["Z"].default_value = sign * math.sin(COIL_ANGLE)
-        return comb.outputs["Vector"]
-
-    def lobe(sign):
-        b = _new(nt, "ShaderNodeBsdfPrincipled")
-        b.inputs["Base Color"].default_value = (*colour, 1)
-        b.inputs["Roughness"].default_value = 0.42
-        b.inputs["IOR"].default_value = 1.575          # PET polyester
-        if "Anisotropic" in b.inputs:
-            b.inputs["Anisotropic"].default_value = 0.75
-            nt.links.new(tangent(sign), b.inputs["Tangent"])
-        if "Sheen Weight" in b.inputs:
-            b.inputs["Sheen Weight"].default_value = 0.06
-            b.inputs["Sheen Roughness"].default_value = 0.3
-        nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
-        return b
-
-    mix = _new(nt, "ShaderNodeMixShader")
-    mix.inputs["Fac"].default_value = 0.5
-    nt.links.new(lobe(+1.0).outputs["BSDF"], mix.inputs[1])
-    nt.links.new(lobe(-1.0).outputs["BSDF"], mix.inputs[2])
-    nt.links.new(mix.outputs["Shader"], out.inputs["Surface"])
+    # Anisotropy along the cord, which here is the circumferential direction:
+    # (-y, x, 0) / r. That is what draws the horizontal satin band.
+    nx = _new(nt, "ShaderNodeMath")
+    nx.operation = "DIVIDE"
+    nt.links.new(sep.outputs["Y"], nx.inputs[0])
+    nt.links.new(r.outputs[0], nx.inputs[1])
+    negx = _new(nt, "ShaderNodeMath")
+    negx.operation = "MULTIPLY"
+    negx.inputs[1].default_value = -1.0
+    nt.links.new(nx.outputs[0], negx.inputs[0])
+    ny = _new(nt, "ShaderNodeMath")
+    ny.operation = "DIVIDE"
+    nt.links.new(sep.outputs["X"], ny.inputs[0])
+    nt.links.new(r.outputs[0], ny.inputs[1])
+    tang = _new(nt, "ShaderNodeCombineXYZ")
+    nt.links.new(negx.outputs[0], tang.inputs["X"])
+    nt.links.new(ny.outputs[0], tang.inputs["Y"])
+    tang.inputs["Z"].default_value = 0.0
+    if "Anisotropic" in b.inputs:
+        b.inputs["Anisotropic"].default_value = 0.6
+        nt.links.new(tang.outputs["Vector"], b.inputs["Tangent"])
     return mat
 
 
