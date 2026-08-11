@@ -126,9 +126,23 @@ def reset_scene():
     world = bpy.data.worlds.new("W")
     scene.world = world
     world.use_nodes = True
-    bg = world.node_tree.nodes["Background"]
-    bg.inputs[0].default_value = (0.16, 0.15, 0.14, 1)
-    bg.inputs[1].default_value = 0.7
+    wt = world.node_tree
+    bg = wt.nodes["Background"]
+    bg.inputs[1].default_value = 0.35
+
+    # A graded sky rather than a flat colour. Plastic reads as plastic largely
+    # through what it reflects, and a constant world gives every reflection a
+    # featureless wash -- which is most of why a correct-looking shader still
+    # comes out looking CG. Nishita is procedural, so no HDRI file needed.
+    sky = wt.nodes.new("ShaderNodeTexSky")
+    sky.sky_type = "NISHITA"
+    sky.sun_elevation = math.radians(28.0)
+    sky.sun_rotation = math.radians(200.0)
+    sky.altitude = 0.0
+    sky.air_density = 1.6
+    sky.dust_density = 2.2
+    sky.sun_intensity = 0.15
+    wt.links.new(sky.outputs["Color"], bg.inputs[0])
     return scene
 
 
@@ -886,19 +900,45 @@ def printed_plastic(name, colour):
     b.inputs["Base Color"].default_value = (*colour, 1)
     b.inputs["IOR"].default_value = 1.46
     b.inputs["Metallic"].default_value = 0.0
-    for opt in ("Subsurface Weight", "Sheen Weight", "Anisotropic", "Coat Weight"):
+    for opt in ("Sheen Weight", "Anisotropic", "Coat Weight"):
         if opt in b.inputs:
             b.inputs[opt].default_value = 0.0
+    if "Subsurface Weight" in b.inputs:
+        # PLA has none of acrylic's translucency, but a trace stops the
+        # surface reading as a perfectly sealed dielectric.
+        b.inputs["Subsurface Weight"].default_value = 0.015
+        b.inputs["Subsurface Radius"].default_value = (0.15, 0.13, 0.11)
 
+    # Matte plastic sits at 0.6-0.9 roughness, and no real surface is uniform.
+    # Two noise scales rather than one: a broad drift across the part plus a
+    # finer break-up, so reflections never resolve into a clean gradient.
     co = _new(nt, "ShaderNodeTexCoord")
     broad = _new(nt, "ShaderNodeTexNoise")
-    broad.inputs["Scale"].default_value = 140.0
-    broad.inputs["Detail"].default_value = 2.0
+    broad.inputs["Scale"].default_value = 110.0
+    broad.inputs["Detail"].default_value = 3.0
     nt.links.new(co.outputs["Object"], broad.inputs["Vector"])
+    fine = _new(nt, "ShaderNodeTexNoise")
+    fine.inputs["Scale"].default_value = 900.0
+    fine.inputs["Detail"].default_value = 4.0
+    nt.links.new(co.outputs["Object"], fine.inputs["Vector"])
+
+    bw = _new(nt, "ShaderNodeMath")
+    bw.operation = "MULTIPLY"
+    bw.inputs[1].default_value = 0.7
+    nt.links.new(broad.outputs["Fac"], bw.inputs[0])
+    fw = _new(nt, "ShaderNodeMath")
+    fw.operation = "MULTIPLY"
+    fw.inputs[1].default_value = 0.3
+    nt.links.new(fine.outputs["Fac"], fw.inputs[0])
+    mixn = _new(nt, "ShaderNodeMath")
+    mixn.operation = "ADD"
+    nt.links.new(bw.outputs[0], mixn.inputs[0])
+    nt.links.new(fw.outputs[0], mixn.inputs[1])
+
     rough = _new(nt, "ShaderNodeMapRange")
-    rough.inputs[3].default_value = 0.57
-    rough.inputs[4].default_value = 0.66
-    nt.links.new(broad.outputs["Fac"], rough.inputs[0])
+    rough.inputs[3].default_value = 0.62
+    rough.inputs[4].default_value = 0.80
+    nt.links.new(mixn.outputs[0], rough.inputs[0])
     nt.links.new(rough.outputs[0], b.inputs["Roughness"])
 
     micro = _new(nt, "ShaderNodeTexNoise")
