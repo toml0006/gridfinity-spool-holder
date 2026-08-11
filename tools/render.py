@@ -201,59 +201,109 @@ def _new(nt, kind):
     return nt.nodes.new(kind)
 
 
-def filament_material(name, colour):
-    """FDM print.
+def _bead_lobe(nt, coord_socket, axis, pitch_mm):
+    """Height field for a row of squished extrusion beads.
 
-    Walls get layer lines at the real layer pitch. Top-facing surfaces get
-    extrusion beads instead, at nozzle width and running in one direction --
-    a print does not have layer lines on its top faces, and texturing the
-    whole part the same way is what makes a render look like CAD.
+    A bead is not a sine wave. It leaves the nozzle round, gets squashed
+    against the layer below, and the exposed face is left as an arc of that
+    round bead meeting its neighbours at a cusp. Across one pitch that is
+
+        u = 2*frac(x / pitch) - 1        position within the bead, -1..1
+        h = sqrt(1 - u*u)                the arc
+
+    which gives a fat rounded ridge separated from the next by a narrow, deep
+    crevice. A sine gives crests and valleys of equal width and is most of
+    why procedural "layer lines" look like corduroy instead of plastic.
+    """
+    sep = _new(nt, "ShaderNodeSeparateXYZ")
+    nt.links.new(coord_socket, sep.inputs["Vector"])
+
+    scaled = _new(nt, "ShaderNodeMath")
+    scaled.operation = "MULTIPLY"
+    scaled.inputs[1].default_value = 1.0 / (pitch_mm * MM)
+    nt.links.new(sep.outputs[axis], scaled.inputs[0])
+
+    t = _new(nt, "ShaderNodeMath")
+    t.operation = "FRACT"
+    nt.links.new(scaled.outputs[0], t.inputs[0])
+
+    u = _new(nt, "ShaderNodeMath")
+    u.operation = "MULTIPLY_ADD"
+    u.inputs[1].default_value = 2.0
+    u.inputs[2].default_value = -1.0
+    nt.links.new(t.outputs[0], u.inputs[0])
+
+    u2 = _new(nt, "ShaderNodeMath")
+    u2.operation = "POWER"
+    u2.inputs[1].default_value = 2.0
+    nt.links.new(u.outputs[0], u2.inputs[0])
+
+    inner = _new(nt, "ShaderNodeMath")
+    inner.operation = "SUBTRACT"
+    inner.inputs[0].default_value = 1.0
+    nt.links.new(u2.outputs[0], inner.inputs[1])
+
+    h = _new(nt, "ShaderNodeMath")
+    h.operation = "SQRT"
+    h.use_clamp = True
+    nt.links.new(inner.outputs[0], h.inputs[0])
+    return h.outputs[0]
+
+
+def filament_material(name, colour, displace=False):
+    """FDM print surface.
+
+    Walls carry stacked layer beads at the layer height. Top faces carry
+    extrusion beads at nozzle width, rotated 45 degrees the way a slicer lays
+    them. Both use the arc profile above.
+
+    With `displace` the height field also drives real displacement, which is
+    the only way the layer stepping reaches the silhouette. A bump map cannot
+    move a profile edge, and a dead straight silhouette on a close-up is what
+    gives away a render of a "printed" part.
     """
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nt = mat.node_tree
     bsdf = nt.nodes["Principled BSDF"]
-    bsdf.inputs["Base Color"].default_value = (*colour, 1)
-    bsdf.inputs["Specular IOR Level"].default_value = 0.4
+    bsdf.inputs["Specular IOR Level"].default_value = 0.42
     if "Subsurface Weight" in bsdf.inputs:
-        bsdf.inputs["Subsurface Weight"].default_value = 0.02
-        bsdf.inputs["Subsurface Radius"].default_value = (0.5, 0.45, 0.4)
-    if "Sheen Weight" in bsdf.inputs:
-        # Extruded plastic keeps a faint directional sheen off the beads.
-        bsdf.inputs["Sheen Weight"].default_value = 0.08
-        bsdf.inputs["Sheen Roughness"].default_value = 0.5
+        # PLA is not a pure opaque dielectric; thin walls glow slightly.
+        bsdf.inputs["Subsurface Weight"].default_value = 0.035
+        bsdf.inputs["Subsurface Radius"].default_value = (0.8, 0.7, 0.6)
+    if "Anisotropic" in bsdf.inputs:
+        # Each bead is a cylinder lying on its side, so highlights stretch
+        # along the bead rather than forming round specular dots.
+        # Enough to stretch a highlight along the bead, not so much that matte
+        # PLA starts reading as brushed metal.
+        bsdf.inputs["Anisotropic"].default_value = 0.3
+        tangent = _new(nt, "ShaderNodeTangent")
+        tangent.direction_type = "RADIAL"
+        tangent.axis = "Z"
+        nt.links.new(tangent.outputs["Tangent"], bsdf.inputs["Tangent"])
 
     co = _new(nt, "ShaderNodeTexCoord")
     geo = _new(nt, "ShaderNodeNewGeometry")
 
     # How much this surface faces up: 0 on a wall, 1 on a top face.
-    sep = _new(nt, "ShaderNodeSeparateXYZ")
+    nsep = _new(nt, "ShaderNodeSeparateXYZ")
     upness = _new(nt, "ShaderNodeMath")
     upness.operation = "ABSOLUTE"
     up_ramp = _new(nt, "ShaderNodeMapRange")
-    up_ramp.inputs[1].default_value = 0.55      # from
-    up_ramp.inputs[2].default_value = 0.95      # to
-    nt.links.new(geo.outputs["Normal"], sep.inputs["Vector"])
-    nt.links.new(sep.outputs["Z"], upness.inputs[0])
+    up_ramp.inputs[1].default_value = 0.5
+    up_ramp.inputs[2].default_value = 0.9
+    nt.links.new(geo.outputs["Normal"], nsep.inputs["Vector"])
+    nt.links.new(nsep.outputs["Z"], upness.inputs[0])
     nt.links.new(upness.outputs[0], up_ramp.inputs[0])
 
-    # Wall: bands stacked up Z at the layer pitch.
-    layers = _new(nt, "ShaderNodeTexWave")
-    layers.wave_type = "BANDS"
-    layers.bands_direction = "Z"
-    layers.wave_profile = "SIN"
-    layers.inputs["Scale"].default_value = 1.0 / (LAYER_H * MM * 2)
-    nt.links.new(co.outputs["Object"], layers.inputs["Vector"])
+    wall_h = _bead_lobe(nt, co.outputs["Object"], "Z", LAYER_H)
 
-    # Top: extrusion beads at nozzle width, running along one axis.
-    beads = _new(nt, "ShaderNodeTexWave")
-    beads.wave_type = "BANDS"
-    beads.bands_direction = "X"
-    beads.wave_profile = "SIN"
-    beads.inputs["Scale"].default_value = 1.0 / (BEAD_W * MM * 2)
-    nt.links.new(co.outputs["Object"], beads.inputs["Vector"])
+    # Top beads run at 45 degrees, which is how a slicer fills a surface.
+    spin = _new(nt, "ShaderNodeMapping")
+    spin.inputs["Rotation"].default_value = (0, 0, math.radians(45))
+    nt.links.new(co.outputs["Object"], spin.inputs["Vector"])
+    top_h = _bead_lobe(nt, spin.outputs["Vector"], "X", BEAD_W)
 
-    # Blend the two by upness: wall * (1-f) + top * f
     inv = _new(nt, "ShaderNodeMath")
     inv.operation = "SUBTRACT"
     inv.inputs[0].default_value = 1.0
@@ -261,12 +311,12 @@ def filament_material(name, colour):
 
     wall_w = _new(nt, "ShaderNodeMath")
     wall_w.operation = "MULTIPLY"
-    nt.links.new(layers.outputs["Fac"], wall_w.inputs[0])
+    nt.links.new(wall_h, wall_w.inputs[0])
     nt.links.new(inv.outputs[0], wall_w.inputs[1])
 
     top_w = _new(nt, "ShaderNodeMath")
     top_w.operation = "MULTIPLY"
-    nt.links.new(beads.outputs["Fac"], top_w.inputs[0])
+    nt.links.new(top_h, top_w.inputs[0])
     nt.links.new(up_ramp.outputs[0], top_w.inputs[1])
 
     struct = _new(nt, "ShaderNodeMath")
@@ -274,42 +324,73 @@ def filament_material(name, colour):
     nt.links.new(wall_w.outputs[0], struct.inputs[0])
     nt.links.new(top_w.outputs[0], struct.inputs[1])
 
-    # Imperfections: the surface is not a perfect extrusion.
-    grain = _new(nt, "ShaderNodeTexNoise")
-    grain.inputs["Scale"].default_value = 1400.0
-    grain.inputs["Detail"].default_value = 8.0
-    nt.links.new(co.outputs["Object"], grain.inputs["Vector"])
-
-    grain_w = _new(nt, "ShaderNodeMath")
-    grain_w.operation = "MULTIPLY"
-    grain_w.inputs[1].default_value = 0.28
-    nt.links.new(grain.outputs["Fac"], grain_w.inputs[0])
+    # Extrusion wobbles: flow is never perfectly even, so bead height drifts
+    # slowly along its length.
+    wobble = _new(nt, "ShaderNodeTexNoise")
+    wobble.inputs["Scale"].default_value = 55.0
+    wobble.inputs["Detail"].default_value = 5.0
+    nt.links.new(co.outputs["Object"], wobble.inputs["Vector"])
+    wob_w = _new(nt, "ShaderNodeMath")
+    wob_w.operation = "MULTIPLY"
+    wob_w.inputs[1].default_value = 0.26
+    nt.links.new(wobble.outputs["Fac"], wob_w.inputs[0])
 
     struct_w = _new(nt, "ShaderNodeMath")
     struct_w.operation = "MULTIPLY"
-    struct_w.inputs[1].default_value = 0.72
+    struct_w.inputs[1].default_value = 0.74
     nt.links.new(struct.outputs[0], struct_w.inputs[0])
 
     height = _new(nt, "ShaderNodeMath")
     height.operation = "ADD"
     nt.links.new(struct_w.outputs[0], height.inputs[0])
-    nt.links.new(grain_w.outputs[0], height.inputs[1])
+    nt.links.new(wob_w.outputs[0], height.inputs[1])
+
+    # Micro texture of the filament itself, far finer than a bead.
+    micro = _new(nt, "ShaderNodeTexNoise")
+    micro.inputs["Scale"].default_value = 9000.0
+    micro.inputs["Detail"].default_value = 6.0
+    nt.links.new(co.outputs["Object"], micro.inputs["Vector"])
+
+    micro_bump = _new(nt, "ShaderNodeBump")
+    micro_bump.inputs["Strength"].default_value = 0.12
+    micro_bump.inputs["Distance"].default_value = 0.000004
+    nt.links.new(micro.outputs["Fac"], micro_bump.inputs["Height"])
 
     bump = _new(nt, "ShaderNodeBump")
-    bump.inputs["Strength"].default_value = 0.6
-    bump.inputs["Distance"].default_value = 0.00016
+    # Real bead relief is a few hundredths of a millimetre, not tenths.
+    bump.inputs["Strength"].default_value = 0.85
+    bump.inputs["Distance"].default_value = 0.000026
     nt.links.new(height.outputs[0], bump.inputs["Height"])
+    nt.links.new(micro_bump.outputs["Normal"], bump.inputs["Normal"])
     nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
 
-    # Roughness tracks the same structure, so highlights break along the
-    # beads instead of sitting flat across a face.
+    # Crevices read darker: less light reaches the bottom of a groove, and
+    # dust settles there on a part that has been handled.
+    shade = _new(nt, "ShaderNodeValToRGB")
+    shade.color_ramp.elements[0].position = 0.0
+    # Gentle. Crushing the valleys turns layer lines into hard scanlines;
+    # on a real part the groove is a shading cue, not a black stripe.
+    shade.color_ramp.elements[0].color = (*[c * 0.82 for c in colour], 1)
+    shade.color_ramp.elements[1].position = 0.55
+    shade.color_ramp.elements[1].color = (*colour, 1)
+    nt.links.new(height.outputs[0], shade.inputs["Fac"])
+    nt.links.new(shade.outputs["Color"], bsdf.inputs["Base Color"])
+
+    # Crests are burnished by the nozzle shoulder; valleys stay matte.
     rough = _new(nt, "ShaderNodeMapRange")
-    rough.inputs[1].default_value = 0.0
-    rough.inputs[2].default_value = 1.0
-    rough.inputs[3].default_value = 0.54
-    rough.inputs[4].default_value = 0.70
+    rough.inputs[3].default_value = 0.72
+    rough.inputs[4].default_value = 0.46
     nt.links.new(height.outputs[0], rough.inputs[0])
     nt.links.new(rough.outputs[0], bsdf.inputs["Roughness"])
+
+    if displace:
+        disp = _new(nt, "ShaderNodeDisplacement")
+        disp.inputs["Midlevel"].default_value = 0.5
+        disp.inputs["Scale"].default_value = 0.00005
+        nt.links.new(height.outputs[0], disp.inputs["Height"])
+        out = nt.nodes["Material Output"]
+        nt.links.new(disp.outputs["Displacement"], out.inputs["Displacement"])
+        mat.displacement_method = "BOTH"
     return mat
 
 
@@ -543,11 +624,22 @@ def peg_positions():
     return [(x - ox, y - oy) for x, y in pts]
 
 
-def import_bin(name="bin", z=REST):
+def import_bin(name="bin", z=REST, displace=False):
     before = set(bpy.data.objects)
     bpy.ops.wm.stl_import(filepath=STL, global_scale=MM)
     obj = (set(bpy.data.objects) - before).pop()
     obj.name = name
+
+    # global_scale sets object.scale and leaves the mesh in millimetres, but
+    # object-space texture coordinates read mesh-local values. Without this
+    # the shader sees a part 53 units tall instead of 0.053, so every pitch
+    # derived from a real dimension comes out 1000x too fine and aliases into
+    # noise. Apply the scale so local space is metres like everything else.
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
     obj.location.z = z          # never coplanar with what it rests on
 
     bev = obj.modifiers.new("bevel", "BEVEL")
@@ -556,7 +648,27 @@ def import_bin(name="bin", z=REST):
     bev.limit_method = "ANGLE"
     bev.angle_limit = math.radians(35)
     bev.harden_normals = True
-    obj.data.materials.append(filament_material("pla_" + name, FILAMENT))
+
+    if displace:
+        # Adaptive subdivision dices to camera, so the layer relief only gets
+        # real geometry where it is actually visible. Without this the mesh
+        # would need billions of faces to resolve 0.2mm over 125mm.
+        scene = bpy.context.scene
+        scene.cycles.feature_set = "EXPERIMENTAL"
+        # 1px dicing over the whole part ran out of memory: the bin is 125mm
+        # of wall plus thirty pegs, and all of it gets diced, not just the
+        # 45mm the camera is looking at. Coarser dice, hard subdivision cap,
+        # and aggressive offscreen falloff keep it inside memory while the
+        # visible wall still resolves well under a layer.
+        scene.cycles.dicing_rate = 2.5
+        scene.cycles.max_subdivisions = 6
+        scene.cycles.offscreen_dicing_scale = 16.0
+        sub = obj.modifiers.new("subd", "SUBSURF")
+        sub.subdivision_type = "SIMPLE"
+        obj.cycles.use_adaptive_subdivision = True
+
+    obj.data.materials.append(
+        filament_material("pla_" + name, FILAMENT, displace=displace))
     return obj
 
 
@@ -679,7 +791,39 @@ def shot_macro():
     return "macro_base_lip"
 
 
+def shot_material():
+    """Tight on a wall corner and the rim: the shot for judging the filament.
+
+    Framed at about 45mm across so a 0.2mm layer is roughly 9 pixels, and lit
+    across the layers rather than along them. Raking light is the whole game
+    for reading extrusion relief; light it head on and even a correct surface
+    goes flat.
+    """
+    scene = reset_scene()
+    craft_room(scene, props=False)
+    import_bin(displace=True)
+
+    # Square on to the front wall. On a receding corner every horizontal line
+    # is slanted by perspective, so a wrong bead direction is unfalsifiable;
+    # face on, layer lines must read dead horizontal or the shader is wrong.
+    # From steeply above, skimming down the face. Layer lines run horizontally,
+    # so a light from the side travels along the grooves and shadows nothing;
+    # the relief only appears when the light crosses them.
+    area_light("rake", (-0.05, -0.135, 0.26), (0, -0.084, 0.020),
+               (0.16, 0.12), 2.6, (1.0, 0.95, 0.88))
+    area_light("fill", (0.40, -0.26, 0.10), (0, -0.084, 0.040),
+               (0.5, 0.4), 0.8, (0.86, 0.91, 1.0))
+    # No depth of field: at 100mm and 0.22m this is macro range, where even
+    # f/16 is millimetres deep and the surface never resolves.
+    # Wide enough to read as an object -- rim, wall and a corner -- rather
+    # than a texture swatch, but still about 75mm across so a 0.2mm layer
+    # spans several pixels.
+    camera(scene, (0.055, -0.245, 0.079), (0.0, -0.080, 0.034), lens=85)
+    return "material_detail"
+
+
 SHOTS = {
+    "material_detail": shot_material,
     "hero_empty": lambda: shot_hero(False),
     "hero_loaded": lambda: shot_hero(True),
     "stacked": shot_stacked,
