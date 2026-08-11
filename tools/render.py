@@ -134,10 +134,23 @@ def reset_scene():
     world.use_nodes = True
     wt = world.node_tree
     bg = wt.nodes["Background"]
-    # Dim. The sky is here to give reflections something to resolve, not
-    # to light the scene -- at full strength it floods a dark grey part
-    # to mid grey and flattens the contrast the softboxes were carrying.
-    bg.inputs[1].default_value = 0.09
+    # Reflection duty only, enforced rather than dialled. A Nishita sky is a
+    # full hemisphere at physical radiance: even at 0.09 strength it was
+    # lighting the scene about nine times over, measured off the render at
+    # 0.71 sRGB on a wall that should sit near 0.24. Splitting by ray type
+    # gives glossy rays a bright sky to reflect while diffuse rays see almost
+    # nothing, so the softboxes keep doing the actual lighting.
+    lp = wt.nodes.new("ShaderNodeLightPath")
+    inv = wt.nodes.new("ShaderNodeMath")
+    inv.operation = "SUBTRACT"
+    inv.inputs[0].default_value = 1.0
+    wt.links.new(lp.outputs["Is Diffuse Ray"], inv.inputs[1])
+    amt = wt.nodes.new("ShaderNodeMath")
+    amt.operation = "MULTIPLY_ADD"
+    amt.inputs[1].default_value = 0.55      # glossy and camera rays
+    amt.inputs[2].default_value = 0.006     # diffuse floor
+    wt.links.new(inv.outputs[0], amt.inputs[0])
+    wt.links.new(amt.outputs[0], bg.inputs[1])
 
     # A graded sky rather than a flat colour. Plastic reads as plastic largely
     # through what it reflects, and a constant world gives every reflection a
