@@ -410,7 +410,7 @@ def filament_material(name, colour, displace=False):
     micro.inputs["Detail"].default_value = 5.0
     nt.links.new(co.outputs["Object"], micro.inputs["Vector"])
     micro_bump = _new(nt, "ShaderNodeBump")
-    micro_bump.inputs["Strength"].default_value = 0.35
+    micro_bump.inputs["Strength"].default_value = 0.5
     micro_bump.inputs["Distance"].default_value = 0.0000025   # 2.5um
     nt.links.new(micro.outputs["Fac"], micro_bump.inputs["Height"])
 
@@ -437,9 +437,14 @@ def filament_material(name, colour, displace=False):
         nt.links.new(disp.outputs["Displacement"], out.inputs["Displacement"])
         mat.displacement_method = "BOTH"
     else:
+        # Bump only, no real geometry. 45um is the physically measured
+        # envelope, but bump shades weaker than displacement and the Cycles
+        # denoiser eats fine detail, so at listing framing it disappears
+        # entirely. Pushed to 110um -- still under the 200um layer height, and
+        # a listing has to actually show that the part is printed.
         bump = _new(nt, "ShaderNodeBump")
-        bump.inputs["Strength"].default_value = 0.7
-        bump.inputs["Distance"].default_value = 0.000045
+        bump.inputs["Strength"].default_value = 1.0
+        bump.inputs["Distance"].default_value = 0.00019
         nt.links.new(height.outputs[0], bump.inputs["Height"])
         nt.links.new(micro_bump.outputs["Normal"], bump.inputs["Normal"])
         nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
@@ -784,6 +789,11 @@ def craft_room(scene, props=True):
     # Soft top to keep the interior of the bin readable.
     area_light("top", (-0.15, -0.15, 1.5), (0, 0, 0.05),
                (1.2, 1.2), 40, (1.0, 0.97, 0.92))
+    # Small, harder accent raking down the front walls. The window is 1.5m of
+    # very soft light, which is flattering but shades micro-relief almost not
+    # at all; layer lines need one tighter source crossing them to register.
+    area_light("accent", (-0.30, -0.55, 0.62), (0.02, -0.06, 0.020),
+               (0.14, 0.10), 12, (1.0, 0.96, 0.90))
 
 
 # --------------------------------------------------------------------------
